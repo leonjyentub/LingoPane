@@ -1,0 +1,65 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+tmp
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Test / tooling caches
+coverage
+.cache
+.eslintcache
+
+# Tauri / Rust build outputs
+src-tauri/target
+src-tauri/gen
+
+# Optional local Tauri logs
+src-tauri/*.log
+
+# macOS system files
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# Frontend / bundler caches
+.vite
+.parcel-cache
+.turbo
+
+# Test outputs
+playwright-report
+test-results
+
+# Temporary files
+*.tmp
+*.temp
+*~
