@@ -18,8 +18,118 @@
 - PDF 文字依行距、欄位與字級分組為穩定區塊 ID
 - 翻譯結果依原始座標覆蓋，保留頁面圖片、表格線與背景
 - 翻譯回應格式與區塊 ID 驗證
+- 依頁串行處理的跨頁翻譯佇列、進度顯示與停止後續頁面
+- 翻譯文字區塊的基礎溢位偵測與自動縮字
 
-下一階段會加入跨頁翻譯工作佇列、真正中止後端請求、SQLite 翻譯快取、文字溢位偵測與更完整的雙欄／表格版面測試。
+尚待完成的主要項目是真正中止已送出的後端 HTTP 請求、SQLite 翻譯快取、縮到最小字級後仍溢位的顯式告警，以及更完整的雙欄／表格版面自動化測試。
+
+## Docling 版面分析整合 Roadmap
+
+### 目標與技術決策
+
+LingoPane 預計將 [Docling](https://github.com/docling-project/docling) 整合為「可選的增強分析層」，用來改善雙欄論文、表格、圖說、頁首／頁尾、掃描頁與複雜閱讀順序的辨識。現有 PDF.js 流程仍負責即時預覽、原生文字與精確座標，oMLX、Ollama 或其他 OpenAI 相容端點則繼續負責本地翻譯。
+
+預定原則：
+
+- 不以 Docling 取代 PDF.js 渲染，而是合併兩者的優點。
+- 優先使用 Docling standard pipeline 的版面、表格與 OCR 能力，不預設將每一頁送進 VLM。
+- 只對掃描頁、文字層損壞或低信心版面使用選擇性 OCR／VLM fallback。
+- Docling 與模型必須可在本機執行；不默認將 PDF 送往雲端服務。
+- 不整合 MarkItDown。它的 Markdown 輸出難以穩定對應回 PDF 座標，與目前「保留原版面翻譯」的核心需求不符。
+- 在驗證品質改善前，不將 Python、PyTorch 與所有 Docling 模型直接打包進主 App DMG。
+
+### 預計架構
+
+```text
+本機 PDF
+├─ PDF.js：即時渲染、原生文字、字形遮罩與精確座標
+└─ Docling worker：閱讀順序、區塊類型、階層、表格、OCR 與信心度
+       │
+       └─ Rust layout adapter：座標正規化與 PDF.js / Docling 對齊
+              │
+              └─ Translation Units：標題、段落、圖說、表格儲存格與上下文
+                     │
+                     ├─ oMLX / Ollama：本地翻譯
+                     ├─ SQLite：分析與翻譯快取
+                     └─ React overlay：依原始座標呈現翻譯
+```
+
+LingoPane 會建立自有的版本化 `DocumentAnalysis` 格式，不讓 React 直接依賴 Docling JSON schema。每個分析區塊至少包含文件 hash、頁碼、區塊類型、文字、閱讀順序、左上原點 bounding box、階層關係、信心度與是否可翻譯。穩定 ID 將由 PDF hash、analyzer/model 版本、頁碼、區塊參照與正規化文字組成。
+
+### TODO 與驗收條件
+
+#### 1. 建立版面基準測試集
+
+- [ ] 收集可重複測試的單欄、雙欄、跨欄標題、表格、圖說、公式與掃描 PDF。
+- [ ] 為閱讀順序、區塊類型、表格儲存格與不可翻譯區域建立人工確認的 golden data。
+- [ ] 建立 PDF.js 現有規則與 Docling standard pipeline 的比較報告。
+
+驗收：每次版面算法變更都能自動顯示閱讀順序、區塊分類、表格完整度與文字遺漏的差異。
+
+#### 2. Docling prototype 與本機服務邊界
+
+- [ ] 先以 `docling-serve` 或最小 Python worker 建立獨立 prototype。
+- [ ] 限制服務只監聽 localhost，加入健康檢查、版本回報、job ID、進度與取消介面。
+- [ ] 預設使用 standard pipeline，啟用 layout 與 table structure，對原生文字 PDF 避免不必要的 OCR。
+- [ ] 記錄分析時間、峰值記憶體、模型下載量與失敗原因。
+
+驗收：在 Apple Silicon Mac 上可全程離線分析測試 PDF，並回傳含頁碼、類型、文字、閱讀順序與 bounding box 的版本化 JSON。
+
+#### 3. Rust adapter 與座標融合
+
+- [ ] 定義 `DocumentAnalysis`、`AnalyzedPage`、`AnalyzedItem` 與 `TranslationUnit` schema。
+- [ ] 將 Docling 的 `TOPLEFT` / `BOTTOMLEFT` 座標統一為 PDF.js 使用的左上原點座標。
+- [ ] 以頁碼、文字正規化與幾何重疊對齊 PDF.js text items 與 Docling items。
+- [ ] 加入低信心配對和 Docling 不可用時的 PDF.js fallback。
+
+驗收：切換「快速」與「Docling 增強」模式時不影響 PDF 渲染與雙向同步捲動，且翻譯區塊可穩定對齊原始頁面。
+
+#### 4. 以文件結構重建翻譯單元
+
+- [ ] 依閱讀順序組合同段落的跨行文字，並支援跨頁段落。
+- [ ] 將 section heading、前後段落、圖說與表格欄名當作翻譯上下文，但只回傳指定區塊 ID。
+- [ ] 表格依儲存格翻譯，保留 row/column span、數字、單位與公式。
+- [ ] 排除頁首、頁尾、公式、裝飾文字與純數字區塊。
+
+驗收：雙欄內容不會跨欄誤合併，表格不會被展平成無結構段落，且模型不能新增、刪除或更改區塊 ID。
+
+#### 5. 快取、工作佇列與真正取消
+
+- [ ] 以 SQLite 分開儲存 Docling 分析結果與翻譯結果。
+- [ ] 快取 key 納入 PDF hash、Docling/model 版本、區塊 schema 版本、翻譯模型、語言對與 prompt 版本。
+- [ ] 統一分析與翻譯 job queue，支援頁級進度、重試、優先順序與失敗恢復。
+- [ ] 取消時真正終止 reqwest HTTP request 或 Docling worker job，不只是忽略回傳結果。
+
+驗收：重新開啟同一份 PDF 不需重複分析或翻譯；更換模型、語言或分析 schema 時只失效相關快取；取消後本機後端不再繼續佔用運算資源。
+
+#### 6. 選擇性 OCR / VLM fallback
+
+- [ ] 以頁面原生文字量、版面信心度與分析異常自動判斷是否需要 OCR。
+- [ ] 優先使用 macOS Vision 或 Docling 支援的本地 OCR，並只處理需要的頁面。
+- [ ] 將 oMLX／Ollama 多模態端點視為選用 VLM provider，在模型具備圖像輸入能力時才開放。
+- [ ] 保留 OCR／VLM 結果、信心度與原始頁圖的可追溯關係。
+
+驗收：原生文字 PDF 不會無故啟動 VLM；掃描 PDF 能產生可翻譯且可映射回頁面的文字區塊；所有流程可在本機離線執行。
+
+#### 7. macOS 發佈與模型生命週期
+
+- [ ] 在 prototype 驗證後決定提供「使用者自管 Docling service」或「LingoPane 管理的可下載 sidecar」。
+- [ ] 如提供 sidecar，將 Python runtime、Docling 套件與模型儲存在版本化的 Application Support / Cache 目錄，不直接膨脹主 App bundle。
+- [ ] 加入下載大小、磁碟空間、模型版本、更新、移除、license attribution 與離線狀態介面。
+- [ ] 將 sidecar 與資源納入 codesign、notarization 與完整卸載測試。
+
+驗收：未啟用 Docling 的使用者不需下載大型依賴；啟用後可由 App 清楚管理引擎與模型狀態，且不破壞 macOS 簽章、公證與離線使用。
+
+### 預期成果
+
+完成上述 roadmap 後，LingoPane 預期能達成：
+
+- 簡單 PDF 保持現有快速開啟體驗，複雜 PDF 可選擇更高品質的 Docling 增強分析。
+- 顯著降低雙欄跨欄誤合併、頁首／頁尾誤翻譯、圖說錯位與表格展平等問題。
+- 翻譯模型可取得章節、段落、表格欄名與圖說上下文，提升術語一致性與跨頁連貫性。
+- 掃描文件可在本機透過 OCR／VLM fallback 轉成可翻譯且可對齊的內容。
+- 分析與翻譯結果可重複使用、可版本化失效、可真正取消，並能透過基準測試防止版面回歸。
+- PDF 內容、分析、OCR 與翻譯維持 local-first，使用者可明確選擇所使用的本地引擎與模型。
 
 ## 開發環境
 
@@ -69,13 +179,13 @@ cargo fetch --locked --manifest-path src-tauri/Cargo.toml
 
 ### 產生 App 圖示
 
-目前 `src-tauri/icons/` 不會出現在全新 clone 的專案中，第一次打包前需從專案內的主圖產生 Tauri 需要的 `.icns`、`.ico` 與 PNG 圖示：
+專案已將 Tauri 打包必需的圖示納入 Git。如果更新了圖示主檔，可從無外圍留白的滿版主圖重新產生 `.icns`、`.ico` 與 PNG：
 
 ```bash
-npm run tauri icon assets/app-icon-master-padded.png
+npm run icons
 ```
 
-產生結果位於 `src-tauri/icons/`。如果缺少這些檔案，Tauri 打包時會因找不到 `icon.icns` 等圖示而失敗。
+圖示來源是 `assets/app-icon-master.png`，產生結果位於 `src-tauri/icons/`。`npm run bundle:mac` 與 `npm run bundle:mac:app` 都會在打包前自動重新產生圖示。
 
 ## 開發模式
 
@@ -112,7 +222,7 @@ PATH="/opt/homebrew/opt/rustup/bin:$PATH" \
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 
 APPLE_SIGNING_IDENTITY="-" \
-  npm run tauri build -- --bundles app,dmg
+  npm run bundle:mac
 ```
 
 專案的 `src-tauri/tauri.conf.json` 已設定 `bundle.targets` 為 `all`，所以也可以簡寫為：
@@ -132,7 +242,7 @@ src-tauri/target/release/bundle/dmg/LingoPane — Local PDF Translator_0.1.0_aar
 
 ```bash
 APPLE_SIGNING_IDENTITY="-" \
-  npm run tauri build -- --bundles app
+  npm run bundle:mac:app
 ```
 
 ### 只建立 DMG
