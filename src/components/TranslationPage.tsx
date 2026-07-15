@@ -14,6 +14,7 @@ type TranslationPageProps = {
   translations?: TranslatedBlock[];
   status?: TranslationStatus;
   error?: string;
+  onLayoutResolved?: (pageNumber: number, layout: PdfPageLayout) => void;
 };
 
 type FittedTextBlockProps = {
@@ -65,7 +66,7 @@ function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textA
   );
 }
 
-export function TranslationPage({ document, pageNumber, scale, layoutOverride, translationFontScale = 1.8, translations, status = "idle", error }: TranslationPageProps) {
+export function TranslationPage({ document, pageNumber, scale, layoutOverride, translationFontScale = 1.8, translations, status = "idle", error, onLayoutResolved }: TranslationPageProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLElement>(null);
   const [visible, setVisible] = useState(pageNumber <= 2);
@@ -96,12 +97,15 @@ export function TranslationPage({ document, pageNumber, scale, layoutOverride, t
       setLayout((current) => ({ ...current, width: viewport.width, height: viewport.height }));
       if (visible) {
         getPageLayout(document, pageNumber).then((nextLayout) => {
-          if (!cancelled) setLayout(nextLayout);
+          if (!cancelled) {
+            setLayout(nextLayout);
+            onLayoutResolved?.(pageNumber, nextLayout);
+          }
         }).catch(console.error);
       }
     }).catch(console.error);
     return () => { cancelled = true; };
-  }, [document, layoutOverride, pageNumber, visible]);
+  }, [document, layoutOverride, onLayoutResolved, pageNumber, visible]);
 
   useEffect(() => {
     let renderTask: RenderTask | undefined;

@@ -26,6 +26,7 @@ type ReaderSettings = {
   analysisMode: AnalysisMode;
   doclingPythonPath: string;
   doclingOcr: boolean;
+  cacheDocumentLimit: number;
 };
 
 const providerDefaults: Record<Provider, string> = {
@@ -34,7 +35,7 @@ const providerDefaults: Record<Provider, string> = {
   "openai-compatible": "https://api.openai.com/v1",
 };
 
-const settingsVersion = 3;
+const settingsVersion = 4;
 
 const initialSettings: ReaderSettings = {
   provider: "omlx",
@@ -47,6 +48,7 @@ const initialSettings: ReaderSettings = {
   analysisMode: "fast",
   doclingPythonPath: "",
   doclingOcr: false,
+  cacheDocumentLimit: 30,
 };
 
 type TranslationResult = {
@@ -82,6 +84,15 @@ type DoclingAnalysisBatchEvent = {
   analysis: DocumentAnalysis;
 };
 
+type OpenedCachedDocument = {
+  documentId: string;
+};
+
+type CachedDocumentData = {
+  layouts: Array<{ pageNumber: number; layout: PdfPageLayout }>;
+  translations: Array<{ pageNumber: number; blocks: TranslatedBlock[] }>;
+};
+
 type AnalysisSettings = Pick<ReaderSettings, "analysisMode" | "doclingPythonPath" | "doclingOcr">;
 
 type WebKitGestureEvent = Event & {
@@ -92,6 +103,23 @@ function errorMessage(cause: unknown) {
   if (typeof cause === "string") return cause;
   if (cause instanceof Error) return cause.message;
   return "發生未預期的錯誤";
+}
+
+function analysisCacheKey(settings: Pick<ReaderSettings, "analysisMode" | "doclingOcr">) {
+  return settings.analysisMode === "docling"
+    ? `layout-v2:docling:ocr-${settings.doclingOcr ? "on" : "off"}`
+    : "layout-v2:pdfjs";
+}
+
+function translationCacheKey(settings: ReaderSettings) {
+  return JSON.stringify({
+    version: 1,
+    provider: settings.provider,
+    baseUrl: settings.baseUrl.trim().replace(/\/+$/, ""),
+    model: settings.model.trim(),
+    sourceLanguage: settings.sourceLanguage,
+    targetLanguage: settings.targetLanguage,
+  });
 }
 
 function loadSettings(): ReaderSettings {
@@ -112,6 +140,10 @@ function loadSettings(): ReaderSettings {
     }
     if (typeof parsed.doclingPythonPath !== "string") parsed.doclingPythonPath = "";
     if (typeof parsed.doclingOcr !== "boolean") parsed.doclingOcr = initialSettings.doclingOcr;
+    if (typeof parsed.cacheDocumentLimit !== "number" || !Number.isFinite(parsed.cacheDocumentLimit)) {
+      parsed.cacheDocumentLimit = initialSettings.cacheDocumentLimit;
+    }
+    parsed.cacheDocumentLimit = Math.max(1, Math.min(500, Math.round(parsed.cacheDocumentLimit)));
     parsed.translationFontScale = Math.max(0.8, Math.min(2, parsed.translationFontScale));
     return { ...initialSettings, ...parsed, apiKey: "" };
   } catch {
@@ -143,6 +175,8 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const loadingTaskRef = useRef<PDFDocumentLoadingTask | null>(null);
   const pdfBytesRef = useRef<Uint8Array | null>(null);
+  const documentCacheIdRef = useRef("");
+  const activeTranslationKeyRef = useRef(translationCacheKey(settings));
   const analysisRunRef = useRef(0);
   const activeAnalysisSettingsRef = useRef<AnalysisSettings>({
     analysisMode: settings.analysisMode,
@@ -182,6 +216,8 @@ function App() {
     priorityPage: number,
   ) => {
     const run = ++analysisRunRef.current;
+    const cacheDocumentId = documentCacheIdRef.current;
+    const cacheAnalysisKey = analysisCacheKey({ analysisMode: "docling", doclingOcr: options.doclingOcr });
     await invoke("cancel_docling_analysis").catch(() => false);
     if (analysisRunRef.current !== run) return;
     setEnhancedLayouts({});
@@ -193,6 +229,16 @@ function App() {
       void buildDoclingLayouts(nextDocument, payload.analysis).then((layouts) => {
         if (workerCompleted || analysisRunRef.current !== run) return;
         setEnhancedLayouts((current) => ({ ...current, ...layouts }));
+        if (cacheDocumentId) {
+          void Promise.all(Object.entries(layouts).map(([pageNumber, layout]) => invoke("save_cached_layout", {
+            request: {
+              documentId: cacheDocumentId,
+              analysisKey: cacheAnalysisKey,
+              pageNumber: Number(pageNumber),
+              layout,
+            },
+          }))).catch(console.error);
+        }
         setAnalysisState({
           status: "loading",
           message: `Docling 已完成第 ${payload.batchStart}–${payload.batchEnd} 頁 · ${payload.completedPages}/${payload.totalPages}`,
@@ -221,6 +267,16 @@ function App() {
       const layouts = await buildDoclingLayouts(nextDocument, analysis);
       if (analysisRunRef.current !== run) return;
       setEnhancedLayouts(layouts);
+      if (cacheDocumentId) {
+        void Promise.all(Object.entries(layouts).map(([pageNumber, layout]) => invoke("save_cached_layout", {
+          request: {
+            documentId: cacheDocumentId,
+            analysisKey: cacheAnalysisKey,
+            pageNumber: Number(pageNumber),
+            layout,
+          },
+        }))).catch(console.error);
+      }
       setAnalysisState({
         status: "success",
         message: `Docling ${analysis.analyzer.version} · ${Object.keys(layouts).length} 頁`,
@@ -254,12 +310,35 @@ function App() {
       loadingTaskRef.current = loadingTask;
       const nextDocument = await loadingTask.promise;
       pdfBytesRef.current = sourceBytes;
+      let cachedLayouts: Record<number, PdfPageLayout> = {};
+      let cachedTranslations: Record<number, TranslatedBlock[]> = {};
+      try {
+        const opened = await invoke<OpenedCachedDocument>("open_cached_document", {
+          pdfBytes: Array.from(sourceBytes),
+          fileName: file.name,
+          pageCount: nextDocument.numPages,
+          maxDocuments: settings.cacheDocumentLimit,
+        });
+        documentCacheIdRef.current = opened.documentId;
+        const cached = await invoke<CachedDocumentData>("load_cached_document", {
+          documentId: opened.documentId,
+          analysisKey: analysisCacheKey(settings),
+          translationKey: translationCacheKey(settings),
+        });
+        cachedLayouts = Object.fromEntries(cached.layouts.map((entry) => [entry.pageNumber, entry.layout]));
+        cachedTranslations = Object.fromEntries(cached.translations.map((entry) => [entry.pageNumber, entry.blocks]));
+      } catch (cacheError) {
+        documentCacheIdRef.current = "";
+        console.error("無法載入文件快取", cacheError);
+      }
       setDocument(nextDocument);
       setFileName(file.name);
       setCurrentPage(1);
       translationJobsRef.current = {};
-      setTranslations({});
-      setTranslationStates({});
+      setTranslations(cachedTranslations);
+      setTranslationStates(Object.fromEntries(
+        Object.keys(cachedTranslations).map((page) => [Number(page), { status: "success" as const }]),
+      ));
       batchJobRef.current += 1;
       batchActivePageRef.current = undefined;
       setBatchTranslation({ running: false, completed: 0, total: 0 });
@@ -270,11 +349,26 @@ function App() {
         doclingPythonPath: settings.doclingPythonPath.trim(),
         doclingOcr: settings.doclingOcr,
       };
-      setEnhancedLayouts({});
+      activeTranslationKeyRef.current = translationCacheKey(settings);
+      setEnhancedLayouts(cachedLayouts);
       if (settings.analysisMode === "docling") {
-        void runDoclingAnalysis(nextDocument, sourceBytes, settings, 1);
+        if (Object.keys(cachedLayouts).length === nextDocument.numPages) {
+          setAnalysisState({
+            status: "success",
+            message: `Docling 快取 · ${nextDocument.numPages} 頁`,
+            pageCount: nextDocument.numPages,
+            totalPages: nextDocument.numPages,
+          });
+        } else {
+          void runDoclingAnalysis(nextDocument, sourceBytes, settings, 1);
+        }
       } else {
-        setAnalysisState({ status: "idle", message: "快速版面分析" });
+        setAnalysisState({
+          status: "idle",
+          message: Object.keys(cachedLayouts).length
+            ? `快速版面分析 · 已載入 ${Object.keys(cachedLayouts).length} 頁快取`
+            : "快速版面分析",
+        });
       }
       sourceScrollRef.current?.scrollTo({ top: 0 });
       translationScrollRef.current?.scrollTo({ top: 0 });
@@ -445,6 +539,7 @@ function App() {
     }
     const { apiKey: _secret, ...safeSettings } = settings;
     localStorage.setItem("parallel-pdf-settings", JSON.stringify({ ...safeSettings, settingsVersion }));
+    await invoke("set_document_cache_limit", { maxDocuments: settings.cacheDocumentLimit });
     setSettings((current) => ({ ...current, apiKey: "" }));
     setApiKeyDirty(false);
   };
@@ -523,21 +618,55 @@ function App() {
         || active.doclingPythonPath !== nextAnalysisSettings.doclingPythonPath
         || active.doclingOcr !== nextAnalysisSettings.doclingOcr;
       activeAnalysisSettingsRef.current = nextAnalysisSettings;
+      const nextTranslationKey = translationCacheKey(settings);
+      const translationSettingsChanged = activeTranslationKeyRef.current !== nextTranslationKey;
+      activeTranslationKeyRef.current = nextTranslationKey;
 
-      if (analysisSettingsChanged) {
+      let cachedLayouts: Record<number, PdfPageLayout> = {};
+      let cachedTranslations: Record<number, TranslatedBlock[]> = {};
+      if (documentCacheIdRef.current && (analysisSettingsChanged || translationSettingsChanged)) {
+        const cached = await invoke<CachedDocumentData>("load_cached_document", {
+          documentId: documentCacheIdRef.current,
+          analysisKey: analysisCacheKey(settings),
+          translationKey: translationCacheKey(settings),
+        });
+        cachedLayouts = Object.fromEntries(cached.layouts.map((entry) => [entry.pageNumber, entry.layout]));
+        cachedTranslations = Object.fromEntries(cached.translations.map((entry) => [entry.pageNumber, entry.blocks]));
+      }
+      if (analysisSettingsChanged || translationSettingsChanged) {
         translationJobsRef.current = {};
         batchJobRef.current += 1;
         batchActivePageRef.current = undefined;
-        setTranslations({});
-        setTranslationStates({});
+        setTranslations(cachedTranslations);
+        setTranslationStates(Object.fromEntries(
+          Object.keys(cachedTranslations).map((page) => [Number(page), { status: "success" as const }]),
+        ));
         setBatchTranslation({ running: false, completed: 0, total: 0 });
+      }
+
+      if (analysisSettingsChanged) {
         if (settings.analysisMode === "docling" && currentDocument && currentBytes) {
-          void runDoclingAnalysis(currentDocument, currentBytes, settings, currentPage);
+          if (Object.keys(cachedLayouts).length === currentDocument.numPages) {
+            setEnhancedLayouts(cachedLayouts);
+            setAnalysisState({
+              status: "success",
+              message: `Docling 快取 · ${currentDocument.numPages} 頁`,
+              pageCount: currentDocument.numPages,
+              totalPages: currentDocument.numPages,
+            });
+          } else {
+            void runDoclingAnalysis(currentDocument, currentBytes, settings, currentPage);
+          }
         } else if (settings.analysisMode === "fast") {
           analysisRunRef.current += 1;
           void invoke("cancel_docling_analysis");
-          setEnhancedLayouts({});
-          setAnalysisState({ status: "idle", message: "快速版面分析" });
+          setEnhancedLayouts(cachedLayouts);
+          setAnalysisState({
+            status: "idle",
+            message: Object.keys(cachedLayouts).length
+              ? `快速版面分析 · 已載入 ${Object.keys(cachedLayouts).length} 頁快取`
+              : "快速版面分析",
+          });
         }
       }
       setShowSettings(false);
@@ -564,6 +693,8 @@ function App() {
 
   const translatePage = async (page: number, job: number): Promise<"success" | "error" | "cancelled"> => {
     if (!document) return "cancelled";
+    const cacheDocumentId = documentCacheIdRef.current;
+    const cacheAnalysisKey = analysisCacheKey(settings);
     translationJobsRef.current[page] = job;
     setTranslationStates((current) => ({ ...current, [page]: { status: "loading" } }));
 
@@ -571,6 +702,16 @@ function App() {
     try {
       const layout = enhancedLayouts[page] ?? await getPageLayout(document, page);
       if (!Array.isArray(layout.blocks)) throw new Error("PDF 文字區塊不是有效陣列");
+      if (cacheDocumentId) {
+        void invoke("save_cached_layout", {
+          request: {
+            documentId: cacheDocumentId,
+            analysisKey: cacheAnalysisKey,
+            pageNumber: page,
+            layout,
+          },
+        }).catch(console.error);
+      }
       phase = "呼叫 LLM 翻譯";
       const result = await invoke<TranslationResult>("translate_blocks", {
         request: {
@@ -583,6 +724,17 @@ function App() {
       if (translationJobsRef.current[page] !== job) return "cancelled";
       setTranslations((current) => ({ ...current, [page]: result.blocks }));
       setTranslationStates((current) => ({ ...current, [page]: { status: "success" } }));
+      if (cacheDocumentId) {
+        void invoke("save_cached_translation", {
+          request: {
+            documentId: cacheDocumentId,
+            analysisKey: cacheAnalysisKey,
+            translationKey: translationCacheKey(settings),
+            pageNumber: page,
+            blocks: result.blocks,
+          },
+        }).catch(console.error);
+      }
       return "success";
     } catch (cause) {
       if (translationJobsRef.current[page] !== job) return "cancelled";
@@ -679,6 +831,19 @@ function App() {
       if (anchor) autoTranslatePageRef.current(anchor.page);
     }, 1000);
   };
+
+  const cacheResolvedLayout = useCallback((pageNumber: number, layout: PdfPageLayout) => {
+    const documentId = documentCacheIdRef.current;
+    if (!documentId) return;
+    void invoke("save_cached_layout", {
+      request: {
+        documentId,
+        analysisKey: analysisCacheKey(settings),
+        pageNumber,
+        layout,
+      },
+    }).catch(console.error);
+  }, [settings.analysisMode, settings.doclingOcr]);
 
   const handleReaderScroll = (from: HTMLDivElement, to: HTMLDivElement | null) => {
     syncFrom(from, to);
@@ -812,6 +977,7 @@ function App() {
                       translations={translations[page]}
                       status={translationStates[page]?.status}
                       error={translationStates[page]?.error}
+                      onLayoutResolved={cacheResolvedLayout}
                     />
                   ))}
                 </div>
@@ -865,6 +1031,20 @@ function App() {
                       </div>
                     </>
                   )}
+                  <label>保留最近文件數量
+                    <input
+                      type="number"
+                      min="1"
+                      max="500"
+                      step="1"
+                      value={settings.cacheDocumentLimit}
+                      onChange={(event) => setSettings({
+                        ...settings,
+                        cacheDocumentLimit: Math.max(1, Math.min(500, Math.round(Number(event.target.value) || 30))),
+                      })}
+                    />
+                    <small className="field-help">預設 30。只保存逐頁辨識版面與翻譯文字，不保存原始 PDF；超過數量時移除最久未使用的文件。</small>
+                  </label>
                 </>
               ) : (
                 <>

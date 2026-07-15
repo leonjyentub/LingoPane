@@ -1,5 +1,7 @@
 # LingoPane
 
+[繁體中文](README.md) | [English](README.en.md)
+
 以原文與翻譯並排閱讀為核心的 macOS PDF 閱讀器。應用程式使用 Tauri 2、React、TypeScript 與 PDF.js，目標是連接 oMLX、Ollama 或任何 OpenAI 相容端點，在本機保留 PDF 原有版面並同步閱讀位置。
 
 ## 目前進度
@@ -24,8 +26,10 @@
 - Docling runtime 探測、版本化分析契約、左上原點座標正規化與 PDF.js 自動 fallback
 - Docling 標題、段落、圖說與表格區塊已可接入既有翻譯與 overlay 流程
 - Docling 以目前頁優先的 5 頁批次分析；每批完成即可使用，並可真正終止目前 worker
+- SQLite 持久化逐頁 PDF.js／Docling 版面與翻譯結果，重新開啟同一文件可直接還原
+- 文件快取預設保留最近 30 份，可在「文件分析設定」調整為 1–500 份；不保存原始 PDF
 
-尚待完成的主要項目是真正中止已送出的後端 HTTP 請求、SQLite 翻譯快取、縮到最小字級後仍溢位的顯式告警，以及更完整的雙欄／表格版面自動化測試。
+尚待完成的主要項目是真正中止已送出的後端 HTTP 請求、縮到最小字級後仍溢位的顯式告警，以及更完整的雙欄／表格版面自動化測試。
 
 ## Docling 版面分析整合 Roadmap
 
@@ -104,8 +108,9 @@ LingoPane 會建立自有的版本化 `DocumentAnalysis` 格式，不讓 React �
 
 #### 5. 快取、工作佇列與真正取消
 
-- [ ] 以 SQLite 分開儲存 Docling 分析結果與翻譯結果。
-- [ ] 快取 key 納入 PDF hash、Docling/model 版本、區塊 schema 版本、翻譯模型、語言對與 prompt 版本。
+- [x] 以 SQLite 分開儲存 PDF.js／Docling 逐頁分析版面與翻譯結果，並以最近使用順序限制文件數量。
+- [x] 快取 key 納入 PDF SHA-256、版面 schema、分析模式、OCR 開關、翻譯服務、模型、語言對與 prompt 版本。
+- [ ] 將 Docling runtime 與官方 layout／table model 的實際版本加入自動失效條件。
 - [ ] 統一分析與翻譯 job queue，支援頁級進度、重試、優先順序與失敗恢復。
 - [x] 取消 Docling 分析時送出 `SIGTERM`，真正終止目前 Python worker。
 - [ ] 取消翻譯時真正終止 reqwest HTTP request，不只是忽略回傳結果。
@@ -173,7 +178,7 @@ tools/docling-runtime/.venv/bin/python tools/docling_worker.py \
   --input tools/tests/fixtures/docling-two-column-table.pdf
 ```
 
-目前 prototype 會透過 Tauri IPC 將 PDF bytes 傳給 Rust，再建立暫存檔交給文件級 Python worker，單檔上限為 200 MB。worker 在同一份文件內只建立一次 Docling converter，預設以 5 頁為一批，優先分析目前頁所在批次，再處理相鄰批次；每批結果會立即送回 React。正式發佈前仍需完成模型下載進度、SQLite 分析快取、逐頁 OCR 判斷，以及以原生檔案路徑降低大型 PDF 的記憶體成本。
+目前 prototype 會透過 Tauri IPC 將 PDF bytes 傳給 Rust，再建立暫存檔交給文件級 Python worker，單檔上限為 200 MB。worker 在同一份文件內只建立一次 Docling converter，預設以 5 頁為一批，優先分析目前頁所在批次，再處理相鄰批次；每批結果會立即送回 React 並寫入 SQLite。正式發佈前仍需完成模型下載進度、Docling 實際模型版本失效、逐頁 OCR 判斷，以及以原生檔案路徑降低大型 PDF 的記憶體成本。
 
 ## 開發環境
 
