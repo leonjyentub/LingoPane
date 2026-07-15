@@ -9,6 +9,7 @@ type TranslationPageProps = {
   document: PDFDocumentProxy;
   pageNumber: number;
   scale: number;
+  layoutOverride?: PdfPageLayout;
   translationFontScale?: number;
   translations?: TranslatedBlock[];
   status?: TranslationStatus;
@@ -22,9 +23,12 @@ type FittedTextBlockProps = {
   width: number;
   height: number;
   fontSize: number;
+  kind: "text" | "heading" | "caption" | "table" | "formula" | "artifact";
+  textAlign?: "left" | "center" | "right";
+  emphasis?: "bold";
 };
 
-function FittedTextBlock({ text, left, top, width, height, fontSize }: FittedTextBlockProps) {
+function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textAlign, emphasis }: FittedTextBlockProps) {
   const ref = useRef<HTMLDivElement>(null);
 
   useLayoutEffect(() => {
@@ -53,15 +57,15 @@ function FittedTextBlock({ text, left, top, width, height, fontSize }: FittedTex
   return (
     <div
       ref={ref}
-      className="translated-block"
-      style={{ left, top, width, height, fontSize }}
+      className={`translated-block is-${kind}`}
+      style={{ left, top, width, height, fontSize, textAlign, fontWeight: emphasis === "bold" ? 700 : undefined }}
     >
       {text}
     </div>
   );
 }
 
-export function TranslationPage({ document, pageNumber, scale, translationFontScale = 1.8, translations, status = "idle", error }: TranslationPageProps) {
+export function TranslationPage({ document, pageNumber, scale, layoutOverride, translationFontScale = 1.8, translations, status = "idle", error }: TranslationPageProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLElement>(null);
   const [visible, setVisible] = useState(pageNumber <= 2);
@@ -81,6 +85,10 @@ export function TranslationPage({ document, pageNumber, scale, translationFontSc
   }, [visible]);
 
   useEffect(() => {
+    if (layoutOverride) {
+      setLayout(layoutOverride);
+      return;
+    }
     let cancelled = false;
     document.getPage(pageNumber).then((page) => {
       if (cancelled) return;
@@ -93,7 +101,7 @@ export function TranslationPage({ document, pageNumber, scale, translationFontSc
       }
     }).catch(console.error);
     return () => { cancelled = true; };
-  }, [document, pageNumber, visible]);
+  }, [document, layoutOverride, pageNumber, visible]);
 
   useEffect(() => {
     let renderTask: RenderTask | undefined;
@@ -177,6 +185,9 @@ export function TranslationPage({ document, pageNumber, scale, translationFontSc
               width={Math.max(24, block.width * scale + 4)}
               height={Math.max(block.fontSize * scale * 1.25, block.height * scale + 4)}
               fontSize={Math.max(7, block.fontSize * scale * translationFontScale)}
+              kind={block.kind}
+              textAlign={block.textAlign}
+              emphasis={block.emphasis}
             />
           ))}
         </div>

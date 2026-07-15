@@ -1,0 +1,151 @@
+import type { PDFDocumentProxy } from "pdfjs-dist";
+import { getPageLayout, type PdfPageLayout, type PdfTextBlock } from "./pdfLayout";
+
+export type AnalysisMode = "fast" | "docling";
+
+export type DoclingStatus = {
+  available: boolean;
+  workerVersion: string;
+  schemaVersion: number;
+  doclingVersion?: string;
+  pythonVersion: string;
+  pythonExecutable?: string;
+  error?: string;
+};
+
+export type DocumentAnalysis = {
+  schemaVersion: number;
+  documentHash: string;
+  analyzer: {
+    name: string;
+    version: string;
+    workerVersion: string;
+    modelVersions: Record<string, string>;
+  };
+  pages: AnalyzedPage[];
+  warnings: string[];
+};
+
+export type AnalyzedPage = {
+  pageNumber: number;
+  width: number;
+  height: number;
+  items: AnalyzedItem[];
+};
+
+type AnalyzedItem = {
+  id: string;
+  pageNumber: number;
+  kind: string;
+  sourceLabel: string;
+  text: string;
+  bbox: { left: number; top: number; right: number; bottom: number };
+  readingOrder: number;
+  level: number;
+  confidence?: number;
+  fontSize: number;
+  translatable: boolean;
+  textAlign?: "left" | "center" | "right";
+  emphasis?: "bold";
+  tableCell?: {
+    rowStart: number;
+    rowEnd: number;
+    columnStart: number;
+    columnEnd: number;
+  };
+};
+
+const supportedKinds = new Set<PdfTextBlock["kind"]>([
+  "text",
+  "heading",
+  "caption",
+  "table",
+  "formula",
+  "artifact",
+]);
+
+function blockKind(kind: string): PdfTextBlock["kind"] {
+  return supportedKinds.has(kind as PdfTextBlock["kind"])
+    ? kind as PdfTextBlock["kind"]
+    : "text";
+}
+
+function comparableText(text: string) {
+  return text.normalize("NFKC").toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+
+function pdfFragmentsForTableCell(
+  pdfLayout: PdfPageLayout,
+  item: AnalyzedItem,
+  cellBlock: PdfTextBlock,
+): PdfTextBlock[] {
+  if (!item.tableCell) return [];
+  const cellRight = cellBlock.left + cellBlock.width;
+  const cellBottom = cellBlock.top + cellBlock.height;
+  const cellText = comparableText(item.text);
+  if (!cellText) return [];
+
+  return pdfLayout.blocks
+    .filter((block) => {
+      if (!block.text.trim() || block.kind === "artifact") return false;
+      const right = block.left + block.width;
+      const bottom = block.top + block.height;
+      const intersectionWidth = Math.max(0, Math.min(right, cellRight) - Math.max(block.left, cellBlock.left));
+      const intersectionHeight = Math.max(0, Math.min(bottom, cellBottom) - Math.max(block.top, cellBlock.top));
+      const overlap = intersectionWidth * intersectionHeight / Math.max(1, block.width * block.height);
+      if (overlap < 0.55) return false;
+      const fragmentText = comparableText(block.text);
+      return fragmentText.length > 0
+        && (cellText.includes(fragmentText) || fragmentText.includes(cellText));
+    })
+    .sort((left, right) => left.top - right.top || left.left - right.left)
+    .map((block, _index, matches) => ({
+      ...block,
+      id: `${item.id}:pdf:${block.id}`,
+      kind: "table",
+      translatable: item.translatable && block.translatable,
+      textAlign: matches.length === 1 ? item.textAlign : block.textAlign,
+      emphasis: item.emphasis,
+    }));
+}
+
+export function mergeDoclingPage(pdfLayout: PdfPageLayout, page: AnalyzedPage): PdfPageLayout {
+  if (!page.items.length) return pdfLayout;
+  const scaleX = page.width > 0 ? pdfLayout.width / page.width : 1;
+  const scaleY = page.height > 0 ? pdfLayout.height / page.height : 1;
+  const blocks = page.items
+    .slice()
+    .sort((left, right) => left.readingOrder - right.readingOrder)
+    .flatMap<PdfTextBlock>((item) => {
+      const block: PdfTextBlock = {
+        id: item.id,
+        text: item.text,
+        left: item.bbox.left * scaleX,
+        top: item.bbox.top * scaleY,
+        width: Math.max(1, (item.bbox.right - item.bbox.left) * scaleX),
+        height: Math.max(1, (item.bbox.bottom - item.bbox.top) * scaleY),
+        fontSize: Math.max(6, item.fontSize * Math.min(scaleX, scaleY)),
+        kind: blockKind(item.kind),
+        translatable: item.translatable,
+        textAlign: item.textAlign,
+        emphasis: item.emphasis,
+      };
+      const fragments = pdfFragmentsForTableCell(pdfLayout, item, block);
+      return fragments.length ? fragments : [block];
+    });
+
+  return { ...pdfLayout, blocks };
+}
+
+export async function buildDoclingLayouts(
+  document: PDFDocumentProxy,
+  analysis: DocumentAnalysis,
+): Promise<Record<number, PdfPageLayout>> {
+  const layouts: Record<number, PdfPageLayout> = {};
+  await Promise.all(analysis.pages.map(async (page) => {
+    if (page.pageNumber < 1 || page.pageNumber > document.numPages) return;
+    const pdfLayout = await getPageLayout(document, page.pageNumber);
+    layouts[page.pageNumber] = mergeDoclingPage(pdfLayout, page);
+  }));
+  return layouts;
+}

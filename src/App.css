@@ -24,6 +24,7 @@ button { color: inherit; }
 .primary-button, .secondary-button, .translate-button, .translate-all-button, .icon-button { border: 0; cursor: pointer; transition: background .15s ease, opacity .15s ease, transform .15s ease; }
 .primary-button { padding: 7px 13px; border-radius: 7px; color: #fff; background: #b95435; font-size: 12px; font-weight: 620; }
 .primary-button:hover { background: #a9492d; }
+.primary-button:disabled, .secondary-button:disabled, .translate-button:disabled, .translate-all-button:disabled { cursor: default; opacity: .45; }
 .primary-button.large { padding: 11px 18px; font-size: 13px; }
 .secondary-button { padding: 8px 13px; border: 1px solid #d5d1c8; border-radius: 7px; background: #fff; font-size: 12px; font-weight: 600; }
 .icon-button { min-width: 28px; height: 28px; padding: 0 7px; display: grid; place-items: center; border-radius: 6px; background: transparent; font-size: 18px; }
@@ -50,6 +51,10 @@ button { color: inherit; }
 .translate-all-button { padding: 5px 9px; border: 1px solid #d8d3ca; border-radius: 6px; color: #655f57; background: #fff; font-size: 10px; font-weight: 620; white-space: nowrap; }
 .translate-all-button:hover { background: #f0ede7; }
 .batch-progress { padding-left: 1px; color: #8a6b3d; font-size: 10px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.analysis-state { max-width: 190px; padding: 5px 8px; overflow: hidden; border: 1px solid #d9d5cc; border-radius: 6px; color: #6f6a62; background: #f5f3ee; cursor: pointer; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.analysis-state.is-loading { color: #8a632e; border-color: #ddc89f; background: #faf3e5; }
+.analysis-state.is-success { color: #3f7652; border-color: #bad2c1; background: #edf6ef; }
+.analysis-state.is-error { color: #99513e; border-color: #dfc1b8; background: #fbefeb; }
 
 .reader-shell { min-height: 0; flex: 1; display: flex; position: relative; background: #dfddd7; }
 .reader-pane { min-width: 0; display: flex; flex-direction: column; }
@@ -77,6 +82,7 @@ button { color: inherit; }
 .preserved-source-block { position: absolute; display: block; overflow: hidden; white-space: pre-wrap; color: #242220; background: #fffefa; font-family: ui-serif, "Times New Roman", serif; line-height: 1.12; }
 .preserved-source-block.is-table { font-family: inherit; text-align: center; line-height: 1.18; }
 .translated-block { position: absolute; box-sizing: border-box; padding: 2px; overflow: hidden; overflow-wrap: anywhere; white-space: pre-wrap; color: #242220; background: #fffefa; line-height: 1.22; box-shadow: 0 0 0 2px #fffefa; }
+.translated-block.is-table { padding: 3px; background: transparent; box-shadow: none; line-height: 1.15; }
 .spinner { width: 17px; height: 17px; margin-bottom: 5px; border: 2px solid #d9c9c2; border-top-color: #b95435; border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -88,15 +94,26 @@ button { color: inherit; }
 .error-banner { position: absolute; top: 94px; left: 50%; z-index: 20; transform: translateX(-50%); padding: 8px 13px; border: 1px solid #dcae9e; border-radius: 7px; color: #8c3c27; background: #fff4ef; font-size: 11px; box-shadow: 0 4px 15px rgba(60, 30, 20,.12); }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; background: rgba(35, 32, 28, .3); backdrop-filter: blur(3px); }
-.settings-modal { width: min(510px, calc(100vw - 40px)); overflow: hidden; border: 1px solid rgba(80, 70, 58, .18); border-radius: 13px; background: #fbfaf7; box-shadow: 0 22px 70px rgba(33, 28, 23, .25); }
+.settings-modal { width: min(510px, calc(100vw - 40px)); max-height: min(760px, calc(100vh - 40px)); overflow: hidden; display: flex; flex-direction: column; border: 1px solid rgba(80, 70, 58, .18); border-radius: 13px; background: #fbfaf7; box-shadow: 0 22px 70px rgba(33, 28, 23, .25); }
 .settings-title { padding: 18px 19px 15px; display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid #e1ded7; }
 .settings-title div { display: flex; flex-direction: column; gap: 3px; }
 .settings-title span { font-size: 15px; font-weight: 670; }
 .settings-title small { color: #8b867e; font-size: 10px; }
-.settings-grid { padding: 17px 19px; display: grid; gap: 13px; }
+.settings-tabs { padding: 9px 19px 0; display: grid; grid-template-columns: 1fr 1fr; gap: 5px; border-bottom: 1px solid #e1ded7; }
+.settings-tabs button { padding: 9px 10px 10px; border: 0; border-bottom: 2px solid transparent; color: #7a756d; background: transparent; cursor: pointer; font-size: 11px; font-weight: 620; }
+.settings-tabs button:hover { color: #4e4942; background: #f4f1eb; }
+.settings-tabs button.is-active { color: #a7492e; border-bottom-color: #b95435; background: #f7eee9; }
+.settings-grid { padding: 17px 19px; min-height: 0; overflow-y: auto; display: grid; gap: 13px; }
+.settings-section-title { padding-top: 2px; color: #39352f; font-size: 11px; font-weight: 700; letter-spacing: .02em; }
+.settings-section-title:not(:first-child) { margin-top: 5px; padding-top: 14px; border-top: 1px solid #e3dfd7; }
 .settings-grid label { display: grid; gap: 6px; color: #5f5b54; font-size: 10px; font-weight: 600; }
 .settings-grid input, .settings-grid select { width: 100%; height: 34px; padding: 0 10px; border: 1px solid #d8d4cb; border-radius: 7px; color: #393631; outline: none; background: white; font-size: 12px; font-weight: 400; }
 .settings-grid input:focus, .settings-grid select:focus { border-color: #bd775f; box-shadow: 0 0 0 3px rgba(185, 84, 53, .1); }
+.settings-grid .field-help { color: #8b867e; font-size: 9px; font-weight: 400; line-height: 1.45; }
+.settings-grid .checkbox-setting { display: flex; align-items: flex-start; gap: 8px; color: #6c675f; font-weight: 450; line-height: 1.45; }
+.settings-grid .checkbox-setting input { width: auto; height: auto; margin-top: 1px; accent-color: #b95435; }
+.settings-test-button { justify-self: start; }
+.runtime-explanation { padding: 10px 11px; border: 1px solid #e2ded5; border-radius: 7px; color: #6e6961; background: #f5f2ec; font-size: 10px; line-height: 1.55; }
 .secret-field { display: flex; gap: 6px; }
 .secret-field button { flex: 0 0 auto; padding: 0 10px; border: 1px solid #d8d4cb; border-radius: 7px; color: #756f67; background: #f6f4ef; cursor: pointer; font-size: 10px; }
 .secret-field button:disabled { opacity: .45; }

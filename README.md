@@ -1,4 +1,4 @@
-# LingoPane — Local PDF Translator
+# LingoPane
 
 以原文與翻譯並排閱讀為核心的 macOS PDF 閱讀器。應用程式使用 Tauri 2、React、TypeScript 與 PDF.js，目標是連接 oMLX、Ollama 或任何 OpenAI 相容端點，在本機保留 PDF 原有版面並同步閱讀位置。
 
@@ -20,6 +20,10 @@
 - 翻譯回應格式與區塊 ID 驗證
 - 依頁串行處理的跨頁翻譯佇列、進度顯示與停止後續頁面
 - 翻譯文字區塊的基礎溢位偵測與自動縮字
+- 可在設定中切換 PDF.js 快速分析或 Docling standard pipeline 增強分析
+- Docling runtime 探測、版本化分析契約、左上原點座標正規化與 PDF.js 自動 fallback
+- Docling 標題、段落、圖說與表格區塊已可接入既有翻譯與 overlay 流程
+- Docling 以目前頁優先的 5 頁批次分析；每批完成即可使用，並可真正終止目前 worker
 
 尚待完成的主要項目是真正中止已送出的後端 HTTP 請求、SQLite 翻譯快取、縮到最小字級後仍溢位的顯式告警，以及更完整的雙欄／表格版面自動化測試。
 
@@ -27,13 +31,14 @@
 
 ### 目標與技術決策
 
-LingoPane 預計將 [Docling](https://github.com/docling-project/docling) 整合為「可選的增強分析層」，用來改善雙欄論文、表格、圖說、頁首／頁尾、掃描頁與複雜閱讀順序的辨識。現有 PDF.js 流程仍負責即時預覽、原生文字與精確座標，oMLX、Ollama 或其他 OpenAI 相容端點則繼續負責本地翻譯。
+LingoPane 正在將 [Docling](https://github.com/docling-project/docling) 整合為「可選的增強分析層」，用來改善雙欄論文、表格、圖說、頁首／頁尾、掃描頁與複雜閱讀順序的辨識。現有 PDF.js 流程仍負責即時預覽、原生文字與精確座標，oMLX、Ollama 或其他 OpenAI 相容端點則只負責本地文字翻譯。
 
 預定原則：
 
 - 不以 Docling 取代 PDF.js 渲染，而是合併兩者的優點。
-- 優先使用 Docling standard pipeline 的版面、表格與 OCR 能力，不預設將每一頁送進 VLM。
-- 只對掃描頁、文字層損壞或低信心版面使用選擇性 OCR／VLM fallback。
+- 只使用 Docling 官方 Python runtime 的 standard pipeline，包含 PDF parser、layout、table structure 與 OCR。
+- 不嘗試把 Heron、TableFormer 或其他 Docling 模型轉成 oMLX 格式，也不讓 oMLX 承擔文件分析。
+- 只對掃描頁、文字層損壞或低信心版面使用 Docling 的選擇性 OCR。
 - Docling 與模型必須可在本機執行；不默認將 PDF 送往雲端服務。
 - 不整合 MarkItDown。它的 Markdown 輸出難以穩定對應回 PDF 座標，與目前「保留原版面翻譯」的核心需求不符。
 - 在驗證品質改善前，不將 Python、PyTorch 與所有 Docling 模型直接打包進主 App DMG。
@@ -68,19 +73,22 @@ LingoPane 會建立自有的版本化 `DocumentAnalysis` 格式，不讓 React �
 
 #### 2. Docling prototype 與本機服務邊界
 
-- [ ] 先以 `docling-serve` 或最小 Python worker 建立獨立 prototype。
-- [ ] 限制服務只監聽 localhost，加入健康檢查、版本回報、job ID、進度與取消介面。
-- [ ] 預設使用 standard pipeline，啟用 layout 與 table structure，對原生文字 PDF 避免不必要的 OCR。
+- [x] 以最小 Python worker 建立獨立 prototype，避免 React 直接依賴 Docling API。
+- [x] 加入 runtime probe、Python／Docling／worker／schema 版本回報。
+- [x] 使用 standard pipeline，啟用 layout 與 table structure，並讓 OCR 可由設定開關控制。
+- [x] 加入 analysis ID、目前頁優先的 page-range 批次、逐批進度事件與真正終止 worker。
+- [ ] 將首次模型下載／載入與文件分析拆成更細的進度狀態。
 - [ ] 記錄分析時間、峰值記憶體、模型下載量與失敗原因。
 
 驗收：在 Apple Silicon Mac 上可全程離線分析測試 PDF，並回傳含頁碼、類型、文字、閱讀順序與 bounding box 的版本化 JSON。
 
 #### 3. Rust adapter 與座標融合
 
-- [ ] 定義 `DocumentAnalysis`、`AnalyzedPage`、`AnalyzedItem` 與 `TranslationUnit` schema。
-- [ ] 將 Docling 的 `TOPLEFT` / `BOTTOMLEFT` 座標統一為 PDF.js 使用的左上原點座標。
+- [x] 定義版本化 `DocumentAnalysis`、`AnalyzedPage` 與 `AnalyzedItem` schema。
+- [x] 將 Docling 的 `TOPLEFT` / `BOTTOMLEFT` 座標統一為 PDF.js 使用的左上原點座標。
 - [ ] 以頁碼、文字正規化與幾何重疊對齊 PDF.js text items 與 Docling items。
-- [ ] 加入低信心配對和 Docling 不可用時的 PDF.js fallback。
+- [x] 將 Docling 區塊縮放到 PDF.js page viewport，並在 Docling 不可用時自動改用 PDF.js fallback。
+- [ ] 加入低信心配對、跨來源文字對齊與衝突解決。
 
 驗收：切換「快速」與「Docling 增強」模式時不影響 PDF 渲染與雙向同步捲動，且翻譯區塊可穩定對齊原始頁面。
 
@@ -88,7 +96,8 @@ LingoPane 會建立自有的版本化 `DocumentAnalysis` 格式，不讓 React �
 
 - [ ] 依閱讀順序組合同段落的跨行文字，並支援跨頁段落。
 - [ ] 將 section heading、前後段落、圖說與表格欄名當作翻譯上下文，但只回傳指定區塊 ID。
-- [ ] 表格依儲存格翻譯，保留 row/column span、數字、單位與公式。
+- [x] 表格改為逐儲存格翻譯，保留 row/column span、header、原始表格線與每格文字位置。
+- [ ] 補齊數字、單位、公式不可變規則，以及從 PDF 向量線取得更精確的 cell 邊界。
 - [ ] 排除頁首、頁尾、公式、裝飾文字與純數字區塊。
 
 驗收：雙欄內容不會跨欄誤合併，表格不會被展平成無結構段落，且模型不能新增、刪除或更改區塊 ID。
@@ -98,18 +107,18 @@ LingoPane 會建立自有的版本化 `DocumentAnalysis` 格式，不讓 React �
 - [ ] 以 SQLite 分開儲存 Docling 分析結果與翻譯結果。
 - [ ] 快取 key 納入 PDF hash、Docling/model 版本、區塊 schema 版本、翻譯模型、語言對與 prompt 版本。
 - [ ] 統一分析與翻譯 job queue，支援頁級進度、重試、優先順序與失敗恢復。
-- [ ] 取消時真正終止 reqwest HTTP request 或 Docling worker job，不只是忽略回傳結果。
+- [x] 取消 Docling 分析時送出 `SIGTERM`，真正終止目前 Python worker。
+- [ ] 取消翻譯時真正終止 reqwest HTTP request，不只是忽略回傳結果。
 
 驗收：重新開啟同一份 PDF 不需重複分析或翻譯；更換模型、語言或分析 schema 時只失效相關快取；取消後本機後端不再繼續佔用運算資源。
 
-#### 6. 選擇性 OCR / VLM fallback
+#### 6. 選擇性 OCR
 
 - [ ] 以頁面原生文字量、版面信心度與分析異常自動判斷是否需要 OCR。
-- [ ] 優先使用 macOS Vision 或 Docling 支援的本地 OCR，並只處理需要的頁面。
-- [ ] 將 oMLX／Ollama 多模態端點視為選用 VLM provider，在模型具備圖像輸入能力時才開放。
-- [ ] 保留 OCR／VLM 結果、信心度與原始頁圖的可追溯關係。
+- [ ] 使用 Docling standard pipeline 支援的本地 OCR，並只處理需要的頁面。
+- [ ] 保留 OCR 結果、信心度與原始頁圖的可追溯關係。
 
-驗收：原生文字 PDF 不會無故啟動 VLM；掃描 PDF 能產生可翻譯且可映射回頁面的文字區塊；所有流程可在本機離線執行。
+驗收：原生文字 PDF 不會無故啟動 OCR；掃描 PDF 能產生可翻譯且可映射回頁面的文字區塊；所有流程可在本機離線執行。
 
 #### 7. macOS 發佈與模型生命週期
 
@@ -127,9 +136,44 @@ LingoPane 會建立自有的版本化 `DocumentAnalysis` 格式，不讓 React �
 - 簡單 PDF 保持現有快速開啟體驗，複雜 PDF 可選擇更高品質的 Docling 增強分析。
 - 顯著降低雙欄跨欄誤合併、頁首／頁尾誤翻譯、圖說錯位與表格展平等問題。
 - 翻譯模型可取得章節、段落、表格欄名與圖說上下文，提升術語一致性與跨頁連貫性。
-- 掃描文件可在本機透過 OCR／VLM fallback 轉成可翻譯且可對齊的內容。
+- 掃描文件可在本機透過 Docling OCR 轉成可翻譯且可對齊的內容。
 - 分析與翻譯結果可重複使用、可版本化失效、可真正取消，並能透過基準測試防止版面回歸。
 - PDF 內容、分析、OCR 與翻譯維持 local-first，使用者可明確選擇所使用的本地引擎與模型。
+
+### 使用目前的 Docling prototype
+
+Docling 是選用依賴，不會隨一般的 `npm ci` 安裝。建議先安裝 [uv](https://docs.astral.sh/uv/)，再依鎖定檔建立獨立 Python runtime：
+
+```bash
+brew install uv
+uv sync --project tools/docling-runtime --frozen
+
+# 驗證 Python、Docling、worker 與 schema 版本
+tools/docling-runtime/.venv/bin/python tools/docling_worker.py --probe
+```
+
+在 LingoPane 的「文件分析設定」頁選擇「Docling 增強（獨立 Python worker）」。Python 路徑建議留白，App 會依序尋找 `LINGOPANE_DOCLING_PYTHON`、Application Support 內的受管理 runtime、App Resources 內的 runtime、專案的 `tools/docling-runtime/.venv/bin/python`，最後才嘗試系統 Python。若需要覆寫，也可填入專案 runtime 的絕對路徑：
+
+```text
+/path/to/LingoPane/tools/docling-runtime/.venv/bin/python
+```
+
+第一次分析會由 Docling 下載官方 layout／table 模型，時間與磁碟用量會高於後續分析；模型備妥後可在本機離線使用。若 runtime 缺失或分析失敗，App 會保留 PDF 渲染並自動回退到 PDF.js 快速分析。
+
+可用下列指令驗證 bridge 契約與真實 standard pipeline：
+
+```bash
+python3 -m unittest discover -s tools/tests -v
+
+# 重新產生固定的雙欄／表格 fixture
+python3 tools/tests/make_docling_fixture.py
+
+# 首次執行可能下載官方模型；不加 --ocr 可避免對原生文字 PDF 啟動 OCR
+tools/docling-runtime/.venv/bin/python tools/docling_worker.py \
+  --input tools/tests/fixtures/docling-two-column-table.pdf
+```
+
+目前 prototype 會透過 Tauri IPC 將 PDF bytes 傳給 Rust，再建立暫存檔交給文件級 Python worker，單檔上限為 200 MB。worker 在同一份文件內只建立一次 Docling converter，預設以 5 頁為一批，優先分析目前頁所在批次，再處理相鄰批次；每批結果會立即送回 React。正式發佈前仍需完成模型下載進度、SQLite 分析快取、逐頁 OCR 判斷，以及以原生檔案路徑降低大型 PDF 的記憶體成本。
 
 ## 開發環境
 
@@ -234,8 +278,8 @@ APPLE_SIGNING_IDENTITY="-" npm run tauri build
 release 產物位於：
 
 ```text
-src-tauri/target/release/bundle/macos/LingoPane — Local PDF Translator.app
-src-tauri/target/release/bundle/dmg/LingoPane — Local PDF Translator_0.1.0_aarch64.dmg
+src-tauri/target/release/bundle/macos/LingoPane.app
+src-tauri/target/release/bundle/dmg/LingoPane_0.1.0_aarch64.dmg
 ```
 
 ### 只建立 App
@@ -266,7 +310,7 @@ debug 產物會輸出到 `src-tauri/target/debug/bundle/`。debug 版本適合�
 先驗證建置後的 App bundle：
 
 ```bash
-APP="src-tauri/target/release/bundle/macos/LingoPane — Local PDF Translator.app"
+APP="src-tauri/target/release/bundle/macos/LingoPane.app"
 
 codesign --verify --deep --strict --verbose=2 "$APP"
 ```
@@ -281,8 +325,8 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 直接安裝到 `/Applications`：
 
 ```bash
-sudo ditto "$APP" "/Applications/LingoPane — Local PDF Translator.app"
-open "/Applications/LingoPane — Local PDF Translator.app"
+sudo ditto "$APP" "/Applications/LingoPane.app"
+open "/Applications/LingoPane.app"
 ```
 
 也可以開啟 DMG，再將 App 拖進 Applications：

@@ -10,6 +10,8 @@ export type PdfTextBlock = {
   fontSize: number;
   kind: "text" | "heading" | "caption" | "table" | "formula" | "artifact";
   translatable: boolean;
+  textAlign?: "left" | "center" | "right";
+  emphasis?: "bold";
 };
 
 export type PdfPageLayout = {

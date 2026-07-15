@@ -2,14 +2,18 @@ import { ChangeEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect,
 import { GlobalWorkerOptions, getDocument, type PDFDocumentLoadingTask, type PDFDocumentProxy } from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { PdfPage } from "./components/PdfPage";
 import { TranslationPage, type TranslatedBlock, type TranslationStatus } from "./components/TranslationPage";
+import { buildDoclingLayouts, type AnalysisMode, type DoclingStatus, type DocumentAnalysis } from "./lib/docling";
 import { getPageLayout } from "./lib/pdfLayout";
+import type { PdfPageLayout } from "./lib/pdfLayout";
 import "./App.css";
 
 GlobalWorkerOptions.workerSrc = workerUrl;
 
 type Provider = "omlx" | "ollama" | "openai-compatible";
+type SettingsPage = "analysis" | "translation";
 
 type ReaderSettings = {
   provider: Provider;
@@ -19,6 +23,9 @@ type ReaderSettings = {
   sourceLanguage: string;
   targetLanguage: string;
   translationFontScale: number;
+  analysisMode: AnalysisMode;
+  doclingPythonPath: string;
+  doclingOcr: boolean;
 };
 
 const providerDefaults: Record<Provider, string> = {
@@ -27,7 +34,7 @@ const providerDefaults: Record<Provider, string> = {
   "openai-compatible": "https://api.openai.com/v1",
 };
 
-const settingsVersion = 2;
+const settingsVersion = 3;
 
 const initialSettings: ReaderSettings = {
   provider: "omlx",
@@ -37,6 +44,9 @@ const initialSettings: ReaderSettings = {
   sourceLanguage: "auto",
   targetLanguage: "zh-TW",
   translationFontScale: 1.8,
+  analysisMode: "fast",
+  doclingPythonPath: "",
+  doclingOcr: false,
 };
 
 type TranslationResult = {
@@ -56,6 +66,24 @@ type BatchTranslationState = {
   currentPage?: number;
 };
 
+type AnalysisState = {
+  status: "idle" | "loading" | "success" | "error";
+  message: string;
+  pageCount?: number;
+  totalPages?: number;
+};
+
+type DoclingAnalysisBatchEvent = {
+  analysisId: number;
+  batchStart: number;
+  batchEnd: number;
+  completedPages: number;
+  totalPages: number;
+  analysis: DocumentAnalysis;
+};
+
+type AnalysisSettings = Pick<ReaderSettings, "analysisMode" | "doclingPythonPath" | "doclingOcr">;
+
 type WebKitGestureEvent = Event & {
   scale?: number;
 };
@@ -74,11 +102,16 @@ function loadSettings(): ReaderSettings {
     if (parsed.provider === "omlx" && parsed.baseUrl === "http://localhost:8000/v1") {
       parsed.baseUrl = providerDefaults.omlx;
     }
-    if (!parsed.settingsVersion || parsed.settingsVersion < settingsVersion) {
+    if (!parsed.settingsVersion || parsed.settingsVersion < 2) {
       parsed.translationFontScale = initialSettings.translationFontScale;
     } else if (typeof parsed.translationFontScale !== "number" || !Number.isFinite(parsed.translationFontScale)) {
       parsed.translationFontScale = initialSettings.translationFontScale;
     }
+    if (parsed.analysisMode !== "fast" && parsed.analysisMode !== "docling") {
+      parsed.analysisMode = initialSettings.analysisMode;
+    }
+    if (typeof parsed.doclingPythonPath !== "string") parsed.doclingPythonPath = "";
+    if (typeof parsed.doclingOcr !== "boolean") parsed.doclingOcr = initialSettings.doclingOcr;
     parsed.translationFontScale = Math.max(0.8, Math.min(2, parsed.translationFontScale));
     return { ...initialSettings, ...parsed, apiKey: "" };
   } catch {
@@ -96,6 +129,7 @@ function App() {
   const [currentPage, setCurrentPage] = useState(1);
   const [syncScroll, setSyncScroll] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsPage, setSettingsPage] = useState<SettingsPage>("translation");
   const [settings, setSettings] = useState<ReaderSettings>(loadSettings);
   const [models, setModels] = useState<string[]>([]);
   const [settingsBusy, setSettingsBusy] = useState(false);
@@ -104,8 +138,17 @@ function App() {
   const [translations, setTranslations] = useState<Record<number, TranslatedBlock[]>>({});
   const [translationStates, setTranslationStates] = useState<Record<number, PageTranslationState>>({});
   const [batchTranslation, setBatchTranslation] = useState<BatchTranslationState>({ running: false, completed: 0, total: 0 });
+  const [analysisState, setAnalysisState] = useState<AnalysisState>({ status: "idle", message: "快速版面分析" });
+  const [enhancedLayouts, setEnhancedLayouts] = useState<Record<number, PdfPageLayout>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
   const loadingTaskRef = useRef<PDFDocumentLoadingTask | null>(null);
+  const pdfBytesRef = useRef<Uint8Array | null>(null);
+  const analysisRunRef = useRef(0);
+  const activeAnalysisSettingsRef = useRef<AnalysisSettings>({
+    analysisMode: settings.analysisMode,
+    doclingPythonPath: settings.doclingPythonPath.trim(),
+    doclingOcr: settings.doclingOcr,
+  });
   const sourceScrollRef = useRef<HTMLDivElement>(null);
   const translationScrollRef = useRef<HTMLDivElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
@@ -124,10 +167,77 @@ function App() {
   useEffect(() => {
     return () => {
       loadingTaskRef.current?.destroy();
+      analysisRunRef.current += 1;
+      void invoke("cancel_docling_analysis");
       batchJobRef.current += 1;
       if (unlockTimerRef.current) window.clearTimeout(unlockTimerRef.current);
       if (autoTranslateTimerRef.current) window.clearTimeout(autoTranslateTimerRef.current);
     };
+  }, []);
+
+  const runDoclingAnalysis = useCallback(async (
+    nextDocument: PDFDocumentProxy,
+    pdfBytes: Uint8Array,
+    options: Pick<ReaderSettings, "doclingPythonPath" | "doclingOcr">,
+    priorityPage: number,
+  ) => {
+    const run = ++analysisRunRef.current;
+    await invoke("cancel_docling_analysis").catch(() => false);
+    if (analysisRunRef.current !== run) return;
+    setEnhancedLayouts({});
+    setAnalysisState({ status: "loading", message: "Docling 正在準備目前頁批次…", pageCount: 0, totalPages: nextDocument.numPages });
+    let workerCompleted = false;
+    const unlisten = await listen<DoclingAnalysisBatchEvent>("docling-analysis-batch", (event) => {
+      const payload = event.payload;
+      if (workerCompleted || payload.analysisId !== run || analysisRunRef.current !== run) return;
+      void buildDoclingLayouts(nextDocument, payload.analysis).then((layouts) => {
+        if (workerCompleted || analysisRunRef.current !== run) return;
+        setEnhancedLayouts((current) => ({ ...current, ...layouts }));
+        setAnalysisState({
+          status: "loading",
+          message: `Docling 已完成第 ${payload.batchStart}–${payload.batchEnd} 頁 · ${payload.completedPages}/${payload.totalPages}`,
+          pageCount: payload.completedPages,
+          totalPages: payload.totalPages,
+        });
+      }).catch(console.error);
+    }).catch((cause) => {
+      setAnalysisState({
+        status: "error",
+        message: `無法監聽 Docling 批次結果，已改用快速分析：${errorMessage(cause)}`,
+      });
+      return null;
+    });
+    if (!unlisten) return;
+    try {
+      const analysis = await invoke<DocumentAnalysis>("analyze_pdf_with_docling", {
+        analysisId: run,
+        pdfBytes: Array.from(pdfBytes),
+        pythonPath: options.doclingPythonPath.trim() || null,
+        doOcr: options.doclingOcr,
+        pageCount: nextDocument.numPages,
+        priorityPage,
+      });
+      workerCompleted = true;
+      const layouts = await buildDoclingLayouts(nextDocument, analysis);
+      if (analysisRunRef.current !== run) return;
+      setEnhancedLayouts(layouts);
+      setAnalysisState({
+        status: "success",
+        message: `Docling ${analysis.analyzer.version} · ${Object.keys(layouts).length} 頁`,
+        pageCount: Object.keys(layouts).length,
+        totalPages: nextDocument.numPages,
+      });
+    } catch (cause) {
+      workerCompleted = true;
+      if (analysisRunRef.current !== run) return;
+      setEnhancedLayouts({});
+      setAnalysisState({
+        status: "error",
+        message: `Docling 無法使用，已改用快速分析：${errorMessage(cause)}`,
+      });
+    } finally {
+      unlisten();
+    }
   }, []);
 
   const openPdf = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -137,11 +247,13 @@ function App() {
     setLoading(true);
     setError("");
     try {
-      const data = new Uint8Array(await file.arrayBuffer());
+      const sourceBytes = new Uint8Array(await file.arrayBuffer());
+      const data = sourceBytes.slice();
       await loadingTaskRef.current?.destroy();
       const loadingTask = getDocument({ data });
       loadingTaskRef.current = loadingTask;
       const nextDocument = await loadingTask.promise;
+      pdfBytesRef.current = sourceBytes;
       setDocument(nextDocument);
       setFileName(file.name);
       setCurrentPage(1);
@@ -151,6 +263,19 @@ function App() {
       batchJobRef.current += 1;
       batchActivePageRef.current = undefined;
       setBatchTranslation({ running: false, completed: 0, total: 0 });
+      analysisRunRef.current += 1;
+      void invoke("cancel_docling_analysis");
+      activeAnalysisSettingsRef.current = {
+        analysisMode: settings.analysisMode,
+        doclingPythonPath: settings.doclingPythonPath.trim(),
+        doclingOcr: settings.doclingOcr,
+      };
+      setEnhancedLayouts({});
+      if (settings.analysisMode === "docling") {
+        void runDoclingAnalysis(nextDocument, sourceBytes, settings, 1);
+      } else {
+        setAnalysisState({ status: "idle", message: "快速版面分析" });
+      }
       sourceScrollRef.current?.scrollTo({ top: 0 });
       translationScrollRef.current?.scrollTo({ top: 0 });
     } catch (cause) {
@@ -290,6 +415,17 @@ function App() {
     window.addEventListener("pointerup", stop);
   };
 
+  const openSettings = (page: SettingsPage) => {
+    setSettingsPage(page);
+    setConnectionMessage("");
+    setShowSettings(true);
+  };
+
+  const switchSettingsPage = (page: SettingsPage) => {
+    setSettingsPage(page);
+    setConnectionMessage("");
+  };
+
   const updateProvider = (provider: Provider) => {
     setSettings((current) => ({ ...current, provider, baseUrl: providerDefaults[provider], model: "", apiKey: "" }));
     setModels([]);
@@ -331,10 +467,79 @@ function App() {
     }
   };
 
+  const testDocling = async () => {
+    setSettingsBusy(true);
+    setConnectionMessage("正在檢查 Docling Python runtime…");
+    try {
+      const status = await invoke<DoclingStatus>("probe_docling", {
+        pythonPath: settings.doclingPythonPath.trim() || null,
+      });
+      if (!status.available) {
+        setConnectionMessage(
+          `Python ${status.pythonVersion}（${status.pythonExecutable ?? "未知路徑"}）可執行，但 Docling 尚不可用：${status.error ?? "未知錯誤"}`,
+        );
+        return;
+      }
+      setConnectionMessage(
+        `Docling ${status.doclingVersion} 可用 · Python ${status.pythonVersion} · ${status.pythonExecutable}`,
+      );
+    } catch (cause) {
+      setConnectionMessage(errorMessage(cause));
+    } finally {
+      setSettingsBusy(false);
+    }
+  };
+
+  const cancelDoclingAnalysis = async () => {
+    analysisRunRef.current += 1;
+    await invoke("cancel_docling_analysis").catch(() => false);
+    const completed = Object.keys(enhancedLayouts).length;
+    if (completed > 0) {
+      setAnalysisState({
+        status: "success",
+        message: `Docling 分析已停止，保留 ${completed} 頁結果；其餘頁面使用 PDF.js`,
+        pageCount: completed,
+        totalPages: document?.numPages,
+      });
+    } else {
+      setEnhancedLayouts({});
+      setAnalysisState({ status: "error", message: "Docling 分析已停止，改用 PDF.js 快速分析" });
+    }
+  };
+
   const saveSettings = async () => {
     setSettingsBusy(true);
     try {
       await persistSettings();
+      const currentDocument = document;
+      const currentBytes = pdfBytesRef.current;
+      const nextAnalysisSettings: AnalysisSettings = {
+        analysisMode: settings.analysisMode,
+        doclingPythonPath: settings.doclingPythonPath.trim(),
+        doclingOcr: settings.doclingOcr,
+      };
+      const active = activeAnalysisSettingsRef.current;
+      const analysisSettingsChanged = active.analysisMode !== nextAnalysisSettings.analysisMode
+        || active.doclingPythonPath !== nextAnalysisSettings.doclingPythonPath
+        || active.doclingOcr !== nextAnalysisSettings.doclingOcr;
+      activeAnalysisSettingsRef.current = nextAnalysisSettings;
+
+      if (analysisSettingsChanged) {
+        translationJobsRef.current = {};
+        batchJobRef.current += 1;
+        batchActivePageRef.current = undefined;
+        setTranslations({});
+        setTranslationStates({});
+        setBatchTranslation({ running: false, completed: 0, total: 0 });
+        if (settings.analysisMode === "docling" && currentDocument && currentBytes) {
+          void runDoclingAnalysis(currentDocument, currentBytes, settings, currentPage);
+        } else if (settings.analysisMode === "fast") {
+          analysisRunRef.current += 1;
+          void invoke("cancel_docling_analysis");
+          setEnhancedLayouts({});
+          setAnalysisState({ status: "idle", message: "快速版面分析" });
+        }
+      }
       setShowSettings(false);
     } catch (cause) {
       setConnectionMessage(errorMessage(cause));
@@ -364,7 +569,7 @@ function App() {
 
     let phase = "分析 PDF 文字";
     try {
-      const layout = await getPageLayout(document, page);
+      const layout = enhancedLayouts[page] ?? await getPageLayout(document, page);
       if (!Array.isArray(layout.blocks)) throw new Error("PDF 文字區塊不是有效陣列");
       phase = "呼叫 LLM 翻譯";
       const result = await invoke<TranslationResult>("translate_blocks", {
@@ -389,12 +594,18 @@ function App() {
   const ensureTranslationModel = () => {
     if (settings.model.trim()) return true;
     setConnectionMessage("請先測試連線並選擇模型");
+    setSettingsPage("translation");
     setShowSettings(true);
     return false;
   };
 
+  const analysisReadyForPage = (page: number) =>
+    settings.analysisMode !== "docling"
+    || analysisState.status !== "loading"
+    || Boolean(enhancedLayouts[page]);
+
   const translateCurrentPage = async () => {
-    if (!document || batchTranslation.running || !ensureTranslationModel()) return;
+    if (!document || batchTranslation.running || !analysisReadyForPage(currentPage) || !ensureTranslationModel()) return;
     const job = ++translationJobSequenceRef.current;
     await translatePage(currentPage, job);
   };
@@ -405,7 +616,7 @@ function App() {
   };
 
   const translateAllPages = async () => {
-    if (!document || batchTranslation.running || !ensureTranslationModel()) return;
+    if (!document || batchTranslation.running || analysisState.status === "loading" || !ensureTranslationModel()) return;
     const everyPage = Array.from({ length: document.numPages }, (_, index) => index + 1);
     const missingPages = everyPage.filter((page) => !translations[page]);
     const queue = missingPages.length ? missingPages : everyPage;
@@ -443,6 +654,7 @@ function App() {
     if (!document
       || !settings.model.trim()
       || batchTranslation.running
+      || !analysisReadyForPage(page)
       || translations[page]
       || state === "loading"
       || state === "success"
@@ -480,7 +692,7 @@ function App() {
     return () => {
       if (autoTranslateTimerRef.current) window.clearTimeout(autoTranslateTimerRef.current);
     };
-  }, [document]);
+  }, [document, currentPage, enhancedLayouts]);
 
   const pageNumbers = document ? Array.from({ length: document.numPages }, (_, index) => index + 1) : [];
   const currentTranslationStatus = translationStates[currentPage]?.status;
@@ -501,6 +713,17 @@ function App() {
       <section className="toolbar" aria-label="PDF 工具列">
         <input ref={fileInputRef} className="visually-hidden" type="file" accept="application/pdf,.pdf" onChange={openPdf} />
         <button className="primary-button" onClick={() => fileInputRef.current?.click()}>{loading ? "讀取中…" : "開啟 PDF"}</button>
+        {document && (
+          <button
+            className={`analysis-state is-${analysisState.status}`}
+            title={analysisState.message}
+            onClick={() => openSettings("analysis")}
+          >
+            {analysisState.status === "loading" ? `Docling · ${analysisState.pageCount ?? 0}/${analysisState.totalPages ?? document.numPages}` :
+              analysisState.status === "success" ? `Docling · ${analysisState.pageCount ?? 0} 頁` :
+              analysisState.status === "error" ? "快速分析（Docling fallback）" : "快速分析"}
+          </button>
+        )}
         <span className="toolbar-divider" />
         <button className="icon-button" disabled={!document || currentPage <= 1} onClick={() => jumpToPage(currentPage - 1)} aria-label="上一頁">‹</button>
         <label className="page-control">
@@ -520,7 +743,7 @@ function App() {
           <>
             <div className="translation-tools" title={`${settings.provider} · ${settings.model || "尚未選擇模型"}`}>
               <span className={`translation-state-dot is-${batchTranslation.running ? "loading" : currentTranslationStatus ?? "idle"}`} aria-hidden="true" />
-              <button className="language-route" title="開啟翻譯設定" onClick={() => setShowSettings(true)}>{sourceLanguageLabel} <span>→</span> {settings.targetLanguage}</button>
+              <button className="language-route" title="開啟翻譯設定" onClick={() => openSettings("translation")}>{sourceLanguageLabel} <span>→</span> {settings.targetLanguage}</button>
               {batchTranslation.running ? (
                 <>
                   <span className="batch-progress">第 {batchTranslation.currentPage ?? "–"} 頁 · {batchTranslation.completed}/{batchTranslation.total}</span>
@@ -531,9 +754,9 @@ function App() {
                   {currentTranslationStatus === "loading" ? (
                     <button className="translate-button cancel" onClick={cancelCurrentTranslation}>取消翻譯</button>
                   ) : (
-                    <button className="translate-button" onClick={translateCurrentPage}>{translations[currentPage] ? "重新翻譯" : "翻譯目前頁"}</button>
+                    <button className="translate-button" disabled={!analysisReadyForPage(currentPage)} onClick={translateCurrentPage}>{translations[currentPage] ? "重新翻譯" : "翻譯目前頁"}</button>
                   )}
-                  <button className="translate-all-button" onClick={translateAllPages}>{allPagesTranslated ? "重新翻譯全部" : "翻譯全部"}</button>
+                  <button className="translate-all-button" disabled={analysisState.status === "loading"} onClick={translateAllPages}>{allPagesTranslated ? "重新翻譯全部" : "翻譯全部"}</button>
                 </>
               )}
             </div>
@@ -584,6 +807,7 @@ function App() {
                       document={document}
                       pageNumber={page}
                       scale={zoom}
+                      layoutOverride={enhancedLayouts[page]}
                       translationFontScale={settings.translationFontScale}
                       translations={translations[page]}
                       status={translationStates[page]?.status}
@@ -601,55 +825,108 @@ function App() {
         <div className="modal-backdrop" onMouseDown={() => setShowSettings(false)}>
           <section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
             <div className="settings-title">
-              <div><span>翻譯設定</span><small>連接本機或 OpenAI 相容服務</small></div>
+              <div>
+                <span id="settings-title">{settingsPage === "analysis" ? "文件分析設定" : "翻譯設定"}</span>
+                <small>{settingsPage === "analysis" ? "選擇 PDF 版面解析引擎與本機 Docling runtime" : "連接本機翻譯服務並設定語言與顯示方式"}</small>
+              </div>
               <button className="icon-button" onClick={() => setShowSettings(false)} aria-label="關閉">×</button>
             </div>
 
+            <nav className="settings-tabs" aria-label="設定頁面">
+              <button className={settingsPage === "analysis" ? "is-active" : ""} onClick={() => switchSettingsPage("analysis")}>文件分析</button>
+              <button className={settingsPage === "translation" ? "is-active" : ""} onClick={() => switchSettingsPage("translation")}>翻譯設定</button>
+            </nav>
+
             <div className="settings-grid">
-              <label>服務類型
-                <select value={settings.provider} onChange={(event) => updateProvider(event.target.value as Provider)}>
-                  <option value="omlx">oMLX（本機）</option>
-                  <option value="ollama">Ollama（本機）</option>
-                  <option value="openai-compatible">OpenAI 相容端點</option>
-                </select>
-              </label>
-              <label>Base URL<input value={settings.baseUrl} onChange={(event) => setSettings({ ...settings, baseUrl: event.target.value })} /></label>
-              <label>API Key
-                <div className="secret-field">
-                  <input type="password" placeholder={settings.provider === "openai-compatible" ? "留白會沿用 Keychain 內的 Key" : "本機服務通常不需要"} value={settings.apiKey} onChange={(event) => { setSettings({ ...settings, apiKey: event.target.value }); setApiKeyDirty(true); }} />
-                  <button type="button" onClick={clearApiKey} disabled={settingsBusy}>清除</button>
-                </div>
-              </label>
-              {models.length > 0 && (
-                <label>偵測到的模型
-                  <select value={models.includes(settings.model) ? settings.model : ""} onChange={(event) => setSettings({ ...settings, model: event.target.value })}>
-                    <option value="" disabled>選擇模型</option>
-                    {models.map((model) => <option key={model} value={model}>{model}</option>)}
-                  </select>
-                </label>
+              {settingsPage === "analysis" ? (
+                <>
+                  <label>版面分析模式
+                    <select value={settings.analysisMode} onChange={(event) => setSettings({ ...settings, analysisMode: event.target.value as AnalysisMode })}>
+                      <option value="fast">快速（PDF.js）</option>
+                      <option value="docling">Docling 增強（獨立 Python worker）</option>
+                    </select>
+                  </label>
+                  {settings.analysisMode === "docling" && (
+                    <>
+                      <label>Docling Python 路徑
+                        <input
+                          placeholder="留白會自動尋找專案或受管理的 runtime"
+                          value={settings.doclingPythonPath}
+                          onChange={(event) => setSettings({ ...settings, doclingPythonPath: event.target.value })}
+                        />
+                        <small className="field-help">建議留白。App 會優先尋找獨立 Docling venv；只有找不到時才嘗試系統 Python。</small>
+                      </label>
+                      <label className="checkbox-setting">
+                        <input type="checkbox" checked={settings.doclingOcr} onChange={(event) => setSettings({ ...settings, doclingOcr: event.target.checked })} />
+                        <span>啟用 Docling standard pipeline OCR；掃描文件才建議開啟。</span>
+                      </label>
+                      <div className="runtime-explanation">
+                        Docling worker 會在 App 外以獨立 Python subprocess 執行，不會載入 oMLX，也不會修改 macOS 系統 Python。
+                      </div>
+                    </>
+                  )}
+                </>
+              ) : (
+                <>
+                  <label>服務類型
+                    <select value={settings.provider} onChange={(event) => updateProvider(event.target.value as Provider)}>
+                      <option value="omlx">oMLX（本機）</option>
+                      <option value="ollama">Ollama（本機）</option>
+                      <option value="openai-compatible">OpenAI 相容端點</option>
+                    </select>
+                  </label>
+                  <label>Base URL<input value={settings.baseUrl} onChange={(event) => setSettings({ ...settings, baseUrl: event.target.value })} /></label>
+                  <label>API Key
+                    <div className="secret-field">
+                      <input type="password" placeholder={settings.provider === "openai-compatible" ? "留白會沿用 Keychain 內的 Key" : "本機服務通常不需要"} value={settings.apiKey} onChange={(event) => { setSettings({ ...settings, apiKey: event.target.value }); setApiKeyDirty(true); }} />
+                      <button type="button" onClick={clearApiKey} disabled={settingsBusy}>清除</button>
+                    </div>
+                  </label>
+                  {models.length > 0 && (
+                    <label>偵測到的模型
+                      <select value={models.includes(settings.model) ? settings.model : ""} onChange={(event) => setSettings({ ...settings, model: event.target.value })}>
+                        <option value="" disabled>選擇模型</option>
+                        {models.map((model) => <option key={model} value={model}>{model}</option>)}
+                      </select>
+                    </label>
+                  )}
+                  <label>模型名稱
+                    <input placeholder="直接輸入模型名稱" value={settings.model} onChange={(event) => setSettings({ ...settings, model: event.target.value })} />
+                  </label>
+                  <div className="language-row">
+                    <label>來源語言<select value={settings.sourceLanguage} onChange={(event) => setSettings({ ...settings, sourceLanguage: event.target.value })}><option value="auto">自動偵測</option><option value="en">English</option><option value="ja">日本語</option><option value="zh-TW">繁體中文</option></select></label>
+                    <span>→</span>
+                    <label>目標語言<select value={settings.targetLanguage} onChange={(event) => setSettings({ ...settings, targetLanguage: event.target.value })}><option value="zh-TW">繁體中文</option><option value="en">English</option><option value="ja">日本語</option></select></label>
+                  </div>
+                  <label>翻譯字體倍率
+                    <input
+                      type="number"
+                      min="0.8"
+                      max="2"
+                      step="0.1"
+                      value={settings.translationFontScale}
+                      onChange={(event) => setSettings({ ...settings, translationFontScale: Math.max(0.8, Math.min(2, Number(event.target.value) || 1.8)) })}
+                    />
+                  </label>
+                </>
               )}
-              <label>模型名稱
-                <input placeholder="直接輸入模型名稱" value={settings.model} onChange={(event) => setSettings({ ...settings, model: event.target.value })} />
-              </label>
-              <div className="language-row">
-                <label>來源語言<select value={settings.sourceLanguage} onChange={(event) => setSettings({ ...settings, sourceLanguage: event.target.value })}><option value="auto">自動偵測</option><option value="en">English</option><option value="ja">日本語</option><option value="zh-TW">繁體中文</option></select></label>
-                <span>→</span>
-                <label>目標語言<select value={settings.targetLanguage} onChange={(event) => setSettings({ ...settings, targetLanguage: event.target.value })}><option value="zh-TW">繁體中文</option><option value="en">English</option><option value="ja">日本語</option></select></label>
-              </div>
-              <label>翻譯字體倍率
-                <input
-                  type="number"
-                  min="0.8"
-                  max="2"
-                  step="0.1"
-                  value={settings.translationFontScale}
-                  onChange={(event) => setSettings({ ...settings, translationFontScale: Math.max(0.8, Math.min(2, Number(event.target.value) || 1.8)) })}
-                />
-              </label>
             </div>
 
-            <div className={`settings-note ${connectionMessage ? "has-status" : ""}`}>{connectionMessage || "API 請求由 Tauri 後端送出，API Key 僅儲存在 macOS Keychain。"}</div>
-            <div className="modal-actions"><button className="secondary-button" onClick={testProvider} disabled={settingsBusy}>{settingsBusy ? "處理中…" : "測試連線並取得模型"}</button><button className="primary-button" onClick={saveSettings} disabled={settingsBusy}>儲存設定</button></div>
+            <div className={`settings-note ${connectionMessage ? "has-status" : ""}`}>
+              {connectionMessage || (settingsPage === "analysis"
+                ? "Docling runtime 與模型皆在本機執行；若不可用，文件會自動改用 PDF.js 快速分析。"
+                : "API 請求由 Tauri 後端送出，API Key 僅儲存在 macOS Keychain。")}
+            </div>
+            <div className="modal-actions">
+              {settingsPage === "analysis" ? (
+                analysisState.status === "loading"
+                  ? <button className="secondary-button" onClick={cancelDoclingAnalysis}>停止 Docling 分析</button>
+                  : settings.analysisMode === "docling" && <button className="secondary-button" onClick={testDocling} disabled={settingsBusy}>{settingsBusy ? "檢查中…" : "測試 Docling runtime"}</button>
+              ) : (
+                <button className="secondary-button" onClick={testProvider} disabled={settingsBusy}>{settingsBusy ? "處理中…" : "測試連線並取得模型"}</button>
+              )}
+              <button className="primary-button" onClick={saveSettings} disabled={settingsBusy}>儲存設定</button>
+            </div>
           </section>
         </div>
       )}
