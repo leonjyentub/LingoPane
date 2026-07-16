@@ -47,17 +47,16 @@ button { color: inherit; }
 .translation-state-dot.is-loading { background: #d29336; box-shadow: 0 0 0 3px rgba(210, 147, 54, .14); }
 .translation-state-dot.is-success { background: #4f9b68; }
 .translation-state-dot.is-error { background: #bb513d; }
-.language-route { padding: 4px 5px; border: 0; border-radius: 5px; color: inherit; background: transparent; cursor: pointer; white-space: nowrap; font: inherit; font-variant-numeric: tabular-nums; transition: color .15s ease, background .15s ease; }
-.language-route:hover { color: #9f442b; background: #f1e7e1; }
-.language-route:focus-visible { outline: 2px solid rgba(185, 84, 53, .3); outline-offset: 1px; }
-.language-route > span { margin: 0 2px; color: #aaa59d; }
+.translation-summary { max-width: 220px; padding: 4px 5px; overflow: hidden; color: #746f67; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.translation-summary strong { color: #555149; font-weight: 650; }
+.translation-summary > span { margin: 0 2px; color: #aaa59d; }
 .translate-button { padding: 6px 10px; border-radius: 6px; color: #9f442b; background: #f0ded7; font-size: 10px; font-weight: 650; white-space: nowrap; }
 .translate-button:hover { background: #e8cec4; }
 .translate-button.cancel { color: #6f6860; background: #e7e3dc; }
 .translate-all-button { padding: 5px 9px; border: 1px solid #d8d3ca; border-radius: 6px; color: #655f57; background: #fff; font-size: 10px; font-weight: 620; white-space: nowrap; }
 .translate-all-button:hover { background: #f0ede7; }
 .batch-progress { padding-left: 1px; color: #8a6b3d; font-size: 10px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.analysis-state { max-width: 190px; padding: 5px 8px; overflow: hidden; border: 1px solid #d9d5cc; border-radius: 6px; color: #6f6a62; background: #f5f3ee; cursor: pointer; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.analysis-state { max-width: 190px; padding: 5px 8px; overflow: hidden; border: 1px solid #d9d5cc; border-radius: 6px; color: #6f6a62; background: #f5f3ee; cursor: default; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
 .analysis-state.is-loading { color: #8a632e; border-color: #ddc89f; background: #faf3e5; }
 .analysis-state.is-success { color: #3f7652; border-color: #bad2c1; background: #edf6ef; }
 .analysis-state.is-error { color: #99513e; border-color: #dfc1b8; background: #fbefeb; }
@@ -120,7 +119,7 @@ button { color: inherit; }
 .cache-notice { position: absolute; top: 94px; right: 14px; z-index: 18; padding: 6px 9px; border: 1px solid #bfd1c3; border-radius: 6px; color: #477054; background: rgba(239, 247, 241, .96); font-size: 9px; box-shadow: 0 3px 12px rgba(40, 60, 45, .09); }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; background: rgba(35, 32, 28, .3); backdrop-filter: blur(3px); }
-.settings-modal { width: min(510px, calc(100vw - 40px)); max-height: min(760px, calc(100vh - 40px)); overflow: hidden; display: flex; flex-direction: column; border: 1px solid rgba(80, 70, 58, .18); border-radius: 13px; background: #fbfaf7; box-shadow: 0 22px 70px rgba(33, 28, 23, .25); }
+.settings-modal { width: min(580px, calc(100vw - 40px)); max-height: min(800px, calc(100vh - 40px)); overflow: hidden; display: flex; flex-direction: column; border: 1px solid rgba(80, 70, 58, .18); border-radius: 13px; background: #fbfaf7; box-shadow: 0 22px 70px rgba(33, 28, 23, .25); }
 .settings-title { padding: 18px 19px 15px; display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid #e1ded7; }
 .settings-title div { display: flex; flex-direction: column; gap: 3px; }
 .settings-title span { font-size: 15px; font-weight: 670; }
@@ -154,6 +153,6 @@ button { color: inherit; }
   .titlebar { padding-left: 70px; grid-template-columns: 1fr 1fr auto; }
   .sync-control span, .document-title, .translation-state-dot { display: none; }
   .translation-tools { gap: 5px; }
-  .language-route { max-width: 92px; overflow: hidden; text-overflow: ellipsis; }
+  .translation-summary { max-width: 104px; }
   .page-stack { padding-left: 18px; padding-right: 18px; }
 }

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { Translator } from "../i18n";
 
 export type PdfOutlineItem = {
   title: string;
@@ -14,9 +15,10 @@ type OutlineSidebarProps = {
   loading: boolean;
   onClose: () => void;
   onSelect: (item: PdfOutlineItem) => void;
+  t: Translator;
 };
 
-function OutlineBranch({ item, depth, onSelect }: { item: PdfOutlineItem; depth: number; onSelect: (item: PdfOutlineItem) => void }) {
+function OutlineBranch({ item, depth, onSelect, t }: { item: PdfOutlineItem; depth: number; onSelect: (item: PdfOutlineItem) => void; t: Translator }) {
   const [expanded, setExpanded] = useState(true);
   const hasChildren = item.items.length > 0;
 
@@ -27,7 +29,7 @@ function OutlineBranch({ item, depth, onSelect }: { item: PdfOutlineItem; depth:
           <button
             className="outline-disclosure"
             onClick={() => setExpanded((current) => !current)}
-            aria-label={expanded ? `收合 ${item.title}` : `展開 ${item.title}`}
+            aria-label={t(expanded ? "collapseItem" : "expandItem", { title: item.title })}
             aria-expanded={expanded}
           >
             {expanded ? "▾" : "▸"}
@@ -40,31 +42,31 @@ function OutlineBranch({ item, depth, onSelect }: { item: PdfOutlineItem; depth:
           disabled={!item.dest && !item.url}
           title={item.title}
         >
-          {item.title || "未命名項目"}
+          {item.title || t("unnamedOutline")}
         </button>
       </div>
       {hasChildren && expanded && (
-        <ul>{item.items.map((child, index) => <OutlineBranch key={`${child.title}-${index}`} item={child} depth={depth + 1} onSelect={onSelect} />)}</ul>
+        <ul>{item.items.map((child, index) => <OutlineBranch key={`${child.title}-${index}`} item={child} depth={depth + 1} onSelect={onSelect} t={t} />)}</ul>
       )}
     </li>
   );
 }
 
-export function OutlineSidebar({ items, loading, onClose, onSelect }: OutlineSidebarProps) {
+export function OutlineSidebar({ items, loading, onClose, onSelect, t }: OutlineSidebarProps) {
   return (
-    <aside className="outline-sidebar" aria-label="文件目錄">
+    <aside className="outline-sidebar" aria-label={t("outline")}>
       <header>
         <div>
-          <strong>目錄</strong>
-          <span>PDF 內建目錄</span>
+          <strong>{t("outline")}</strong>
+          <span>{t("builtInOutline")}</span>
         </div>
-        <button className="icon-button" onClick={onClose} aria-label="關閉目錄">×</button>
+        <button className="icon-button" onClick={onClose} aria-label={t("closeOutline")}>×</button>
       </header>
-      <nav aria-label="PDF 內建目錄">
-        {loading ? <p className="outline-empty">正在讀取目錄…</p> : items.length ? (
-          <ul>{items.map((item, index) => <OutlineBranch key={`${item.title}-${index}`} item={item} depth={0} onSelect={onSelect} />)}</ul>
+      <nav aria-label={t("builtInOutline")}>
+        {loading ? <p className="outline-empty">{t("readingOutline")}</p> : items.length ? (
+          <ul>{items.map((item, index) => <OutlineBranch key={`${item.title}-${index}`} item={item} depth={0} onSelect={onSelect} t={t} />)}</ul>
         ) : (
-          <p className="outline-empty">這份 PDF 沒有內建目錄。<br />目前不會混用 AI 推測標題。</p>
+          <p className="outline-empty">{t("noOutline")}<br />{t("noAiOutline")}</p>
         )}
       </nav>
     </aside>

@@ -148,6 +148,35 @@ function alignBlockToPdfText(pdfLayout: PdfPageLayout, item: AnalyzedItem, block
   };
 }
 
+function hasReliableDoclingGeometry(blocks: PdfTextBlock[]): boolean {
+  const longTextLocations = new Map<string, PdfTextBlock>();
+  for (const block of blocks) {
+    if (!block.translatable) continue;
+    const normalized = comparableText(block.text);
+    if (!normalized) continue;
+
+    // Docling can represent a paragraph that continues from the bottom of the
+    // left column to the top of the right column as two regions containing the
+    // complete paragraph text. Rendering both regions duplicates the entire
+    // translation and makes either box overflow, so use PDF.js for that page.
+    if (normalized.length >= 160) {
+      const duplicate = longTextLocations.get(normalized);
+      if (duplicate) return false;
+      longTextLocations.set(normalized, block);
+    }
+
+    // A generous character-capacity estimate catches compound Docling regions
+    // whose text covers several disconnected columns while the bbox covers
+    // only a line or two. The generous glyph width avoids rejecting ordinary
+    // dense paragraphs, captions, or narrow table cells.
+    const glyphWidth = Math.max(2.5, block.fontSize * 0.42);
+    const lineHeight = Math.max(6, block.fontSize * 1.08);
+    const capacity = Math.max(1, block.width / glyphWidth) * Math.max(1, block.height / lineHeight);
+    if (normalized.length >= 120 && normalized.length > capacity * 3.2) return false;
+  }
+  return true;
+}
+
 export function mergeDoclingPage(pdfLayout: PdfPageLayout, page: AnalyzedPage): PdfPageLayout {
   if (!page.items.length) return pdfLayout;
   const scaleX = page.width > 0 ? pdfLayout.width / page.width : 1;
@@ -173,7 +202,7 @@ export function mergeDoclingPage(pdfLayout: PdfPageLayout, page: AnalyzedPage): 
       return fragments.length ? fragments : [alignBlockToPdfText(pdfLayout, item, block)];
     });
 
-  return { ...pdfLayout, blocks };
+  return hasReliableDoclingGeometry(blocks) ? { ...pdfLayout, blocks } : pdfLayout;
 }
 
 export async function buildDoclingLayouts(

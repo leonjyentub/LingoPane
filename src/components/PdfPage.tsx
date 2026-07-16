@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist";
+import type { Translator } from "../i18n";
 
 type PdfPageProps = {
   document: PDFDocumentProxy;
   pageNumber: number;
   scale: number;
+  t: Translator;
 };
 
-export function PdfPage({ document, pageNumber, scale }: PdfPageProps) {
+export function PdfPage({ document, pageNumber, scale, t }: PdfPageProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLElement>(null);
   const [visible, setVisible] = useState(pageNumber <= 2);
@@ -60,7 +62,7 @@ export function PdfPage({ document, pageNumber, scale }: PdfPageProps) {
 
   return (
     <article ref={hostRef} className="pdf-page" data-page={pageNumber} style={{ width: size.width, height: size.height }}>
-      {visible && <canvas ref={canvasRef} aria-label={`PDF 第 ${pageNumber} 頁`} />}
+      {visible && <canvas ref={canvasRef} aria-label={t("pdfPage", { page: pageNumber })} />}
       <span className="page-number-badge">{pageNumber}</span>
     </article>
   );

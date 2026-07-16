@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist";
 import { getPageLayout, type PdfPageLayout } from "../lib/pdfLayout";
+import type { Translator } from "../i18n";
 
 export type TranslatedBlock = { id: string; text: string };
 export type TranslationStatus = "idle" | "loading" | "success" | "error";
@@ -16,6 +17,7 @@ type TranslationPageProps = {
   status?: TranslationStatus;
   error?: string;
   onLayoutResolved?: (pageNumber: number, layout: PdfPageLayout) => void;
+  t: Translator;
 };
 
 type FittedTextBlockProps = {
@@ -29,9 +31,10 @@ type FittedTextBlockProps = {
   textAlign?: "left" | "center" | "right";
   emphasis?: "bold";
   lineHeightScale: number;
+  t: Translator;
 };
 
-function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textAlign, emphasis, lineHeightScale }: FittedTextBlockProps) {
+function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textAlign, emphasis, lineHeightScale, t }: FittedTextBlockProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [overflowing, setOverflowing] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -86,14 +89,14 @@ function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textA
           className="overflow-reader-button"
           onClick={() => setExpanded((current) => !current)}
           aria-expanded={expanded}
-          title={expanded ? "收合譯文" : "譯文超出版面，展開完整閱讀"}
-        >{expanded ? "收合" : "展開"}</button>
+          title={t(expanded ? "collapseTranslation" : "expandTranslationHelp")}
+        >{t(expanded ? "collapse" : "expand")}</button>
       )}
     </div>
   );
 }
 
-export function TranslationPage({ document, pageNumber, scale, layoutOverride, translationFontScale = 1.8, translationLineHeightScale = 1, translations, status = "idle", error, onLayoutResolved }: TranslationPageProps) {
+export function TranslationPage({ document, pageNumber, scale, layoutOverride, translationFontScale = 1.8, translationLineHeightScale = 1, translations, status = "idle", error, onLayoutResolved, t }: TranslationPageProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLElement>(null);
   const [visible, setVisible] = useState(pageNumber <= 2);
@@ -220,6 +223,7 @@ export function TranslationPage({ document, pageNumber, scale, layoutOverride, t
               textAlign={block.textAlign}
               emphasis={block.emphasis}
               lineHeightScale={translationLineHeightScale}
+              t={t}
             />
           ))}
         </div>
@@ -233,9 +237,9 @@ export function TranslationPage({ document, pageNumber, scale, layoutOverride, t
             ))}
           </div>
           <div className="translation-status">
-            {status === "loading" ? <><span className="spinner" /><strong>正在翻譯第 {pageNumber} 頁</strong><span>本機模型可能需要一些時間</span></> :
-              status === "error" ? <><strong>翻譯失敗</strong><span className="translation-error">{error}</span></> :
-              <><strong>尚未翻譯</strong><span>按「翻譯目前頁」開始</span></>}
+            {status === "loading" ? <><span className="spinner" /><strong>{t("translatingPage", { page: pageNumber })}</strong><span>{t("localModelWait")}</span></> :
+              status === "error" ? <><strong>{t("translationFailed")}</strong><span className="translation-error">{error}</span></> :
+              <><strong>{t("notTranslated")}</strong><span>{t("translateStartHint")}</span></>}
           </div>
         </div>
       )}
