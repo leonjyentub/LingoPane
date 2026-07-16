@@ -4,6 +4,7 @@ import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { PdfPage } from "./components/PdfPage";
+import { OutlineSidebar, type PdfOutlineItem } from "./components/OutlineSidebar";
 import { TranslationPage, type TranslatedBlock, type TranslationStatus } from "./components/TranslationPage";
 import { buildDoclingLayouts, type AnalysisMode, type DoclingStatus, type DocumentAnalysis } from "./lib/docling";
 import { getPageLayout } from "./lib/pdfLayout";
@@ -59,6 +60,7 @@ type TranslationResult = {
 type PageTranslationState = {
   status: TranslationStatus;
   error?: string;
+  restoredFromCache?: boolean;
 };
 
 type BatchTranslationState = {
@@ -172,6 +174,10 @@ function App() {
   const [batchTranslation, setBatchTranslation] = useState<BatchTranslationState>({ running: false, completed: 0, total: 0 });
   const [analysisState, setAnalysisState] = useState<AnalysisState>({ status: "idle", message: "快速版面分析" });
   const [enhancedLayouts, setEnhancedLayouts] = useState<Record<number, PdfPageLayout>>({});
+  const [outline, setOutline] = useState<PdfOutlineItem[]>([]);
+  const [outlineLoading, setOutlineLoading] = useState(false);
+  const [showOutline, setShowOutline] = useState(false);
+  const [cacheNotice, setCacheNotice] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const loadingTaskRef = useRef<PDFDocumentLoadingTask | null>(null);
   const pdfBytesRef = useRef<Uint8Array | null>(null);
@@ -204,6 +210,9 @@ function App() {
       analysisRunRef.current += 1;
       void invoke("cancel_docling_analysis");
       batchJobRef.current += 1;
+      for (const translationId of Object.values(translationJobsRef.current)) {
+        void invoke("cancel_translation", { translationId });
+      }
       if (unlockTimerRef.current) window.clearTimeout(unlockTimerRef.current);
       if (autoTranslateTimerRef.current) window.clearTimeout(autoTranslateTimerRef.current);
     };
@@ -333,12 +342,34 @@ function App() {
       }
       setDocument(nextDocument);
       setFileName(file.name);
+      setOutline([]);
+      setOutlineLoading(true);
+      setShowOutline(false);
       setCurrentPage(1);
+      for (const translationId of Object.values(translationJobsRef.current)) {
+        void invoke("cancel_translation", { translationId }).catch(console.error);
+      }
       translationJobsRef.current = {};
       setTranslations(cachedTranslations);
       setTranslationStates(Object.fromEntries(
-        Object.keys(cachedTranslations).map((page) => [Number(page), { status: "success" as const }]),
+        Object.keys(cachedTranslations).map((page) => [Number(page), { status: "success" as const, restoredFromCache: true }]),
       ));
+      const restoredTranslationCount = Object.keys(cachedTranslations).length;
+      const restoredLayoutCount = Object.keys(cachedLayouts).length;
+      setCacheNotice(restoredTranslationCount || restoredLayoutCount
+        ? `已從快取還原 · ${restoredTranslationCount} 頁譯文、${restoredLayoutCount} 頁版面`
+        : "未找到快取，將在需要時即時翻譯");
+      void nextDocument.getOutline()
+        .then((items) => {
+          if (loadingTaskRef.current === loadingTask) setOutline((items ?? []) as PdfOutlineItem[]);
+        })
+        .catch((cause) => {
+          console.error("無法讀取 PDF 目錄", cause);
+          if (loadingTaskRef.current === loadingTask) setOutline([]);
+        })
+        .finally(() => {
+          if (loadingTaskRef.current === loadingTask) setOutlineLoading(false);
+        });
       batchJobRef.current += 1;
       batchActivePageRef.current = undefined;
       setBatchTranslation({ running: false, completed: 0, total: 0 });
@@ -493,6 +524,51 @@ function App() {
     }
   };
 
+  const jumpToAnchor = (page: number, ratio: number) => {
+    if (!document) return;
+    const safePage = Math.max(1, Math.min(document.numPages, page));
+    const safeRatio = Math.max(0, Math.min(1, ratio));
+    setCurrentPage(safePage);
+    requestAnimationFrame(() => {
+      if (sourceScrollRef.current) scrollToAnchor(sourceScrollRef.current, safePage, safeRatio);
+      if (translationScrollRef.current) scrollToAnchor(translationScrollRef.current, safePage, safeRatio);
+    });
+  };
+
+  const openOutlineDestination = async (item: PdfOutlineItem) => {
+    if (!document) return;
+    if (!item.dest) {
+      if (item.url) window.open(item.url, "_blank", "noopener,noreferrer");
+      return;
+    }
+    try {
+      const destination = typeof item.dest === "string" ? await document.getDestination(item.dest) : item.dest;
+      if (!destination?.length) throw new Error("目錄項目沒有有效目的地");
+      const pageIndex = typeof destination[0] === "number"
+        ? destination[0]
+        : await document.getPageIndex(destination[0] as { num: number; gen: number });
+      const pageNumber = pageIndex + 1;
+      const page = await document.getPage(pageNumber);
+      const viewport = page.getViewport({ scale: 1 });
+      const destinationKind = (destination[1] as { name?: string } | undefined)?.name;
+      let pdfTop: number | null = null;
+      let pdfLeft = 0;
+      if (destinationKind === "XYZ") {
+        if (typeof destination[2] === "number") pdfLeft = destination[2];
+        if (typeof destination[3] === "number") pdfTop = destination[3];
+      } else if (destinationKind === "FitH" || destinationKind === "FitBH") {
+        if (typeof destination[2] === "number") pdfTop = destination[2];
+      } else if (destinationKind === "FitR") {
+        if (typeof destination[2] === "number") pdfLeft = destination[2];
+        if (typeof destination[5] === "number") pdfTop = destination[5];
+      }
+      const viewportTop = pdfTop === null ? 0 : viewport.convertToViewportPoint(pdfLeft, pdfTop)[1];
+      jumpToAnchor(pageNumber, viewportTop / Math.max(1, viewport.height));
+    } catch (cause) {
+      setError(`無法前往目錄項目「${item.title}」：${errorMessage(cause)}`);
+    }
+  };
+
   const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
     const move = (moveEvent: PointerEvent) => {
@@ -639,7 +715,7 @@ function App() {
         batchActivePageRef.current = undefined;
         setTranslations(cachedTranslations);
         setTranslationStates(Object.fromEntries(
-          Object.keys(cachedTranslations).map((page) => [Number(page), { status: "success" as const }]),
+          Object.keys(cachedTranslations).map((page) => [Number(page), { status: "success" as const, restoredFromCache: true }]),
         ));
         setBatchTranslation({ running: false, completed: 0, total: 0 });
       }
@@ -714,6 +790,7 @@ function App() {
       }
       phase = "呼叫 LLM 翻譯";
       const result = await invoke<TranslationResult>("translate_blocks", {
+        translationId: job,
         request: {
           config: providerConfig(),
           sourceLanguage: settings.sourceLanguage,
@@ -763,6 +840,8 @@ function App() {
   };
 
   const cancelCurrentTranslation = () => {
+    const activeJob = translationJobsRef.current[currentPage];
+    if (activeJob !== undefined) void invoke("cancel_translation", { translationId: activeJob }).catch(console.error);
     translationJobsRef.current[currentPage] = ++translationJobSequenceRef.current;
     setTranslationStates((current) => ({ ...current, [currentPage]: { status: "idle" } }));
   };
@@ -794,6 +873,8 @@ function App() {
     batchJobRef.current += 1;
     const activePage = batchActivePageRef.current;
     if (activePage !== undefined) {
+      const activeJob = translationJobsRef.current[activePage];
+      if (activeJob !== undefined) void invoke("cancel_translation", { translationId: activeJob }).catch(console.error);
       translationJobsRef.current[activePage] = ++translationJobSequenceRef.current;
       setTranslationStates((current) => ({ ...current, [activePage]: { status: translations[activePage] ? "success" : "idle" } }));
     }
@@ -878,6 +959,13 @@ function App() {
       <section className="toolbar" aria-label="PDF 工具列">
         <input ref={fileInputRef} className="visually-hidden" type="file" accept="application/pdf,.pdf" onChange={openPdf} />
         <button className="primary-button" onClick={() => fileInputRef.current?.click()}>{loading ? "讀取中…" : "開啟 PDF"}</button>
+        <button
+          className={`outline-toggle ${showOutline ? "is-active" : ""}`}
+          disabled={!document}
+          onClick={() => setShowOutline((current) => !current)}
+          aria-expanded={showOutline}
+          aria-controls="pdf-outline"
+        >目錄</button>
         {document && (
           <button
             className={`analysis-state is-${analysisState.status}`}
@@ -939,6 +1027,7 @@ function App() {
       </section>
 
       {error && <div className="error-banner">{error}</div>}
+      {document && cacheNotice && <div className="cache-notice" role="status">{cacheNotice}</div>}
 
       <section ref={shellRef} className="reader-shell">
         {!document ? (
@@ -951,6 +1040,11 @@ function App() {
           </div>
         ) : (
           <>
+            {showOutline && (
+              <div id="pdf-outline">
+                <OutlineSidebar items={outline} loading={outlineLoading} onClose={() => setShowOutline(false)} onSelect={openOutlineDestination} />
+              </div>
+            )}
             <section className="reader-pane" aria-label={`原始文件：${fileName}`} style={{ width: `${split}%` }}>
               <div ref={sourceScrollRef} className="page-scroll" onScroll={(event) => handleReaderScroll(event.currentTarget, translationScrollRef.current)}>
                 <div className="page-stack">

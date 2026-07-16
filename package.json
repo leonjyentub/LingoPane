@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:fixtures": "node --test tools/tests/test_pdf_fixture.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "icons": "tauri icon assets/app-icon-master.png",

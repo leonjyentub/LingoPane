@@ -30,9 +30,11 @@ def draw_wrapped_text(pdf: canvas.Canvas, text: str, x: float, y: float, width: 
 
 def main() -> None:
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    pdf = canvas.Canvas(str(OUTPUT), pagesize=letter)
+    pdf = canvas.Canvas(str(OUTPUT), pagesize=letter, invariant=1)
     width, height = letter
     pdf.setTitle("LingoPane Docling Layout Fixture")
+    pdf.bookmarkPage("introduction")
+    pdf.addOutlineEntry("1 Introduction", "introduction", level=0, closed=False)
 
     pdf.setFont("Helvetica-Bold", 18)
     pdf.drawCentredString(width / 2, height - 48, "Layout-Aware Translation Benchmark")
@@ -58,6 +60,8 @@ def main() -> None:
         column_width,
     )
     left_y -= 8
+    pdf.bookmarkHorizontalAbsolute("method", left_y)
+    pdf.addOutlineEntry("2 Method", "method", level=0, closed=False)
     pdf.setFont("Helvetica-Bold", 11)
     pdf.drawString(left_x, left_y, "2. Method")
     pdf.setFont("Helvetica", 9)
@@ -111,6 +115,66 @@ def main() -> None:
 
     pdf.setFont("Helvetica-Oblique", 8)
     pdf.drawCentredString(width / 2, 28, "LingoPane Docling integration fixture - page 1")
+    pdf.showPage()
+
+    pdf.bookmarkPage("architecture")
+    pdf.addOutlineEntry("2.1 Architecture", "architecture", level=1, closed=False)
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawString(margin, height - 54, "2.1 Architecture Across Both Columns")
+    pdf.setFont("Helvetica", 9)
+    draw_wrapped_text(
+        pdf,
+        "This full-width section heading intentionally crosses the column boundary and must remain ahead of both body columns.",
+        margin,
+        height - 73,
+        width - margin * 2,
+    )
+    pdf.setFont("Helvetica-Bold", 11)
+    pdf.drawString(left_x, height - 112, "2.1.1 Source Pane")
+    pdf.drawString(right_x, height - 112, "2.1.2 Translation Pane")
+    pdf.setFont("Helvetica", 9)
+    draw_wrapped_text(
+        pdf,
+        "Native PDF coordinates define the source geometry. Crop boxes and page rotation are normalized through the PDF viewport matrix.",
+        left_x,
+        height - 130,
+        column_width,
+    )
+    draw_wrapped_text(
+        pdf,
+        "Docling semantic blocks are aligned back to matching PDF text runs before translated overlays and source masks are rendered.",
+        right_x,
+        height - 130,
+        column_width,
+    )
+
+    figure_left = margin + 35
+    figure_bottom = height - 390
+    figure_width = width - (margin + 35) * 2
+    figure_height = 120
+    pdf.setStrokeColor(colors.HexColor("#777777"))
+    pdf.setFillColor(colors.HexColor("#f1f1f1"))
+    pdf.rect(figure_left, figure_bottom, figure_width, figure_height, fill=1)
+    pdf.setFillColor(colors.black)
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawCentredString(width / 2, figure_bottom + 62, "PDF.js geometry  ->  Docling semantics  ->  translated overlay")
+    pdf.setFont("Helvetica-Oblique", 9)
+    pdf.drawCentredString(width / 2, figure_bottom - 16, "Figure 1. A cross-column figure with a centered caption")
+
+    pdf.bookmarkHorizontalAbsolute("contributions", figure_bottom - 48)
+    pdf.addOutlineEntry("2.2 Contributions", "contributions", level=1, closed=False)
+    pdf.setFont("Helvetica-Bold", 13)
+    pdf.drawString(margin, figure_bottom - 52, "2.2 Contributions")
+    pdf.setFont("Helvetica", 9)
+    draw_wrapped_text(
+        pdf,
+        "This paragraph is deliberately long enough to exercise translated-text fitting. A verbose target language should reach the minimum font size and expose the complete-text reader instead of silently clipping important content.",
+        margin,
+        figure_bottom - 72,
+        width - margin * 2,
+    )
+    pdf.setFont("Helvetica-Oblique", 8)
+    pdf.drawCentredString(width / 2, 28, "LingoPane layout stress fixture - page 2")
     pdf.showPage()
     pdf.save()
 

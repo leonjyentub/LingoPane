@@ -109,6 +109,45 @@ function pdfFragmentsForTableCell(
     }));
 }
 
+function alignBlockToPdfText(pdfLayout: PdfPageLayout, item: AnalyzedItem, block: PdfTextBlock): PdfTextBlock {
+  const itemText = comparableText(item.text);
+  if (!itemText || block.kind === "formula") return block;
+  const blockRight = block.left + block.width;
+  const blockBottom = block.top + block.height;
+  const nearbyMatches = pdfLayout.blocks.filter((candidate) => {
+    if (!candidate.text.trim() || candidate.kind === "artifact") return false;
+    const candidateText = comparableText(candidate.text);
+    if (!candidateText || !(itemText.includes(candidateText) || candidateText.includes(itemText))) return false;
+    const right = candidate.left + candidate.width;
+    const bottom = candidate.top + candidate.height;
+    const intersectionWidth = Math.max(0, Math.min(right, blockRight) - Math.max(candidate.left, block.left));
+    const intersectionHeight = Math.max(0, Math.min(bottom, blockBottom) - Math.max(candidate.top, block.top));
+    const overlaps = intersectionWidth > 0 && intersectionHeight > 0;
+    const centerDistance = Math.hypot(
+      candidate.left + candidate.width / 2 - (block.left + block.width / 2),
+      candidate.top + candidate.height / 2 - (block.top + block.height / 2),
+    );
+    return overlaps || centerDistance < Math.max(18, Math.min(pdfLayout.width, pdfLayout.height) * 0.045);
+  });
+  if (!nearbyMatches.length) return block;
+
+  const left = Math.min(...nearbyMatches.map((candidate) => candidate.left));
+  const top = Math.min(...nearbyMatches.map((candidate) => candidate.top));
+  const right = Math.max(...nearbyMatches.map((candidate) => candidate.left + candidate.width));
+  const bottom = Math.max(...nearbyMatches.map((candidate) => candidate.top + candidate.height));
+  const medianFontSize = nearbyMatches
+    .map((candidate) => candidate.fontSize)
+    .sort((a, b) => a - b)[Math.floor(nearbyMatches.length / 2)];
+  return {
+    ...block,
+    left,
+    top,
+    width: Math.max(1, right - left),
+    height: Math.max(1, bottom - top),
+    fontSize: Math.max(6, medianFontSize),
+  };
+}
+
 export function mergeDoclingPage(pdfLayout: PdfPageLayout, page: AnalyzedPage): PdfPageLayout {
   if (!page.items.length) return pdfLayout;
   const scaleX = page.width > 0 ? pdfLayout.width / page.width : 1;
@@ -131,7 +170,7 @@ export function mergeDoclingPage(pdfLayout: PdfPageLayout, page: AnalyzedPage): 
         emphasis: item.emphasis,
       };
       const fragments = pdfFragmentsForTableCell(pdfLayout, item, block);
-      return fragments.length ? fragments : [block];
+      return fragments.length ? fragments : [alignBlockToPdfText(pdfLayout, item, block)];
     });
 
   return { ...pdfLayout, blocks };

@@ -18,6 +18,7 @@ pub fn run() {
             llm::save_api_key,
             llm::list_models,
             llm::test_connection,
+            llm::cancel_translation,
             llm::translate_blocks
         ])
         .run(tauri::generate_context!())

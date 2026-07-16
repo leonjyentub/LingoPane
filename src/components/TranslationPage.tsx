@@ -31,6 +31,8 @@ type FittedTextBlockProps = {
 
 function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textAlign, emphasis }: FittedTextBlockProps) {
   const ref = useRef<HTMLDivElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   useLayoutEffect(() => {
     const element = ref.current;
@@ -38,6 +40,8 @@ function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textA
     let frame = 0;
     let attempts = 0;
     const minimum = Math.max(5.5, fontSize * 0.58);
+    setOverflowing(false);
+    setExpanded(false);
     element.style.fontSize = `${fontSize}px`;
 
     const fit = () => {
@@ -49,6 +53,8 @@ function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textA
         attempts += 1;
         element.style.fontSize = `${Math.max(minimum, current * ratio * 0.97)}px`;
         frame = requestAnimationFrame(fit);
+      } else {
+        setOverflowing(element.scrollHeight > element.clientHeight + 1 || element.scrollWidth > element.clientWidth + 1);
       }
     };
     frame = requestAnimationFrame(fit);
@@ -58,10 +64,28 @@ function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textA
   return (
     <div
       ref={ref}
-      className={`translated-block is-${kind}`}
-      style={{ left, top, width, height, fontSize, textAlign, fontWeight: emphasis === "bold" ? 700 : undefined }}
+      className={`translated-block is-${kind}${overflowing ? " has-overflow" : ""}${expanded ? " is-expanded" : ""}`}
+      style={{
+        left,
+        top,
+        width: expanded ? Math.max(width, 280) : width,
+        height: expanded ? "auto" : height,
+        minHeight: height,
+        maxHeight: expanded ? 320 : undefined,
+        fontSize,
+        textAlign,
+        fontWeight: emphasis === "bold" ? 700 : undefined,
+      }}
     >
       {text}
+      {overflowing && (
+        <button
+          className="overflow-reader-button"
+          onClick={() => setExpanded((current) => !current)}
+          aria-expanded={expanded}
+          title={expanded ? "收合譯文" : "譯文超出版面，展開完整閱讀"}
+        >{expanded ? "收合" : "展開"}</button>
+      )}
     </div>
   );
 }

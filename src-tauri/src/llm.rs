@@ -1,10 +1,22 @@
-use futures_util::{stream, StreamExt};
+use futures_util::{
+    future::{AbortHandle, Abortable},
+    stream, StreamExt,
+};
 use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+    time::Duration,
+};
 
 const KEYCHAIN_SERVICE: &str = "com.leonjye.parallelpdf.llm";
+
+fn active_translations() -> &'static Mutex<HashMap<u64, AbortHandle>> {
+    static ACTIVE_TRANSLATIONS: OnceLock<Mutex<HashMap<u64, AbortHandle>>> = OnceLock::new();
+    ACTIVE_TRANSLATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -360,8 +372,7 @@ async fn translate_with_translate_gemma(
     Ok(TranslationResult { blocks, model })
 }
 
-#[tauri::command]
-pub async fn translate_blocks(request: TranslationRequest) -> Result<TranslationResult, String> {
+async fn translate_blocks_inner(request: TranslationRequest) -> Result<TranslationResult, String> {
     if request.config.model.trim().is_empty() {
         return Err("請先選擇翻譯模型".into());
     }
@@ -447,6 +458,42 @@ pub async fn translate_blocks(request: TranslationRequest) -> Result<Translation
         blocks,
         model: request.config.model,
     })
+}
+
+#[tauri::command]
+pub fn cancel_translation(translation_id: u64) -> Result<bool, String> {
+    let handle = active_translations()
+        .lock()
+        .map_err(|_| "翻譯取消狀態無法鎖定".to_string())?
+        .remove(&translation_id);
+    if let Some(handle) = handle {
+        handle.abort();
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+pub async fn translate_blocks(
+    request: TranslationRequest,
+    translation_id: u64,
+) -> Result<TranslationResult, String> {
+    let (abort_handle, abort_registration) = AbortHandle::new_pair();
+    {
+        let mut active = active_translations()
+            .lock()
+            .map_err(|_| "翻譯執行狀態無法鎖定".to_string())?;
+        if let Some(previous) = active.insert(translation_id, abort_handle) {
+            previous.abort();
+        }
+    }
+
+    let result = Abortable::new(translate_blocks_inner(request), abort_registration).await;
+    if let Ok(mut active) = active_translations().lock() {
+        active.remove(&translation_id);
+    }
+    result.map_err(|_| "翻譯已取消".to_string())?
 }
 
 #[cfg(test)]

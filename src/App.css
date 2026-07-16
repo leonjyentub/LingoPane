@@ -22,6 +22,9 @@ button { color: inherit; }
 .toolbar-divider { width: 1px; height: 21px; margin: 0 5px; background: #dedbd4; }
 .toolbar-spacer { flex: 1; }
 .primary-button, .secondary-button, .translate-button, .translate-all-button, .icon-button { border: 0; cursor: pointer; transition: background .15s ease, opacity .15s ease, transform .15s ease; }
+.outline-toggle { height: 28px; padding: 0 10px; border: 1px solid #d8d4cb; border-radius: 6px; color: #625e57; background: #fff; cursor: pointer; font-size: 11px; }
+.outline-toggle:hover:not(:disabled), .outline-toggle.is-active { color: #9f442b; border-color: #d6aa9b; background: #f7ebe6; }
+.outline-toggle:disabled { cursor: default; opacity: .4; }
 .primary-button { padding: 7px 13px; border-radius: 7px; color: #fff; background: #b95435; font-size: 12px; font-weight: 620; }
 .primary-button:hover { background: #a9492d; }
 .primary-button:disabled, .secondary-button:disabled, .translate-button:disabled, .translate-all-button:disabled { cursor: default; opacity: .45; }
@@ -57,6 +60,20 @@ button { color: inherit; }
 .analysis-state.is-error { color: #99513e; border-color: #dfc1b8; background: #fbefeb; }
 
 .reader-shell { min-height: 0; flex: 1; display: flex; position: relative; background: #dfddd7; }
+.outline-sidebar { position: absolute; inset: 0 auto 0 0; z-index: 12; width: min(320px, 42vw); display: flex; flex-direction: column; border-right: 1px solid #cfcac1; background: rgba(251, 250, 247, .98); box-shadow: 8px 0 24px rgba(42, 37, 31, .14); backdrop-filter: blur(8px); }
+.outline-sidebar > header { min-height: 53px; padding: 10px 10px 9px 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #dfdcd5; }
+.outline-sidebar > header div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.outline-sidebar > header strong { font-size: 13px; }
+.outline-sidebar > header span { color: #8b867e; font-size: 9px; }
+.outline-sidebar nav { min-height: 0; overflow: auto; padding: 8px 0 24px; }
+.outline-sidebar ul { margin: 0; padding: 0; list-style: none; }
+.outline-row { min-height: 30px; padding-right: 8px; display: flex; align-items: flex-start; }
+.outline-row:hover { background: #f0ede7; }
+.outline-disclosure { width: 20px; height: 28px; flex: 0 0 20px; padding: 0; border: 0; color: #827d75; background: transparent; cursor: pointer; font-size: 12px; }
+.outline-leaf { width: 20px; flex: 0 0 20px; padding-top: 7px; color: #c0bab1; text-align: center; font-size: 8px; }
+.outline-link { min-width: 0; flex: 1; padding: 7px 3px 6px; overflow: hidden; border: 0; color: #4d4943; background: transparent; cursor: pointer; text-align: left; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.outline-link:disabled { color: #aaa59d; cursor: default; }
+.outline-empty { margin: 20px 18px; color: #858078; font-size: 11px; line-height: 1.6; }
 .reader-pane { min-width: 0; display: flex; flex-direction: column; }
 .page-scroll { min-height: 0; flex: 1; overflow: auto; overscroll-behavior: contain; }
 .page-stack { min-width: max-content; padding: 24px 28px 55px; display: flex; flex-direction: column; align-items: center; gap: 22px; }
@@ -83,6 +100,9 @@ button { color: inherit; }
 .preserved-source-block.is-table { font-family: inherit; text-align: center; line-height: 1.18; }
 .translated-block { position: absolute; box-sizing: border-box; padding: 2px; overflow: hidden; overflow-wrap: anywhere; white-space: pre-wrap; color: #242220; background: #fffefa; line-height: 1.22; box-shadow: 0 0 0 2px #fffefa; }
 .translated-block.is-table { padding: 3px; background: transparent; box-shadow: none; line-height: 1.15; }
+.translated-block.has-overflow { outline: 1px solid rgba(191, 113, 62, .55); outline-offset: 1px; }
+.translated-block.is-expanded { z-index: 30; padding: 10px 44px 10px 10px; overflow: auto; text-align: left !important; background: #fffefa; box-shadow: 0 9px 30px rgba(39, 32, 25, .25), 0 0 0 1px #d6a78f; }
+.overflow-reader-button { position: sticky; top: 0; right: 0; float: right; margin: -1px -1px 3px 5px; padding: 2px 5px; border: 1px solid #d8a993; border-radius: 4px; color: #934329; background: #fff2eb; cursor: pointer; font-size: 8px; line-height: 1.3; }
 .spinner { width: 17px; height: 17px; margin-bottom: 5px; border: 2px solid #d9c9c2; border-top-color: #b95435; border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -92,6 +112,7 @@ button { color: inherit; }
 .empty-state p { margin: 0 0 22px; color: #77726a; font-size: 12px; }
 .empty-state > span { margin-top: 12px; color: #97928a; font-size: 10px; }
 .error-banner { position: absolute; top: 94px; left: 50%; z-index: 20; transform: translateX(-50%); padding: 8px 13px; border: 1px solid #dcae9e; border-radius: 7px; color: #8c3c27; background: #fff4ef; font-size: 11px; box-shadow: 0 4px 15px rgba(60, 30, 20,.12); }
+.cache-notice { position: absolute; top: 94px; right: 14px; z-index: 18; padding: 6px 9px; border: 1px solid #bfd1c3; border-radius: 6px; color: #477054; background: rgba(239, 247, 241, .96); font-size: 9px; box-shadow: 0 3px 12px rgba(40, 60, 45, .09); }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; background: rgba(35, 32, 28, .3); backdrop-filter: blur(3px); }
 .settings-modal { width: min(510px, calc(100vw - 40px)); max-height: min(760px, calc(100vh - 40px)); overflow: hidden; display: flex; flex-direction: column; border: 1px solid rgba(80, 70, 58, .18); border-radius: 13px; background: #fbfaf7; box-shadow: 0 22px 70px rgba(33, 28, 23, .25); }
