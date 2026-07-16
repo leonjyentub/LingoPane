@@ -96,6 +96,11 @@ fn authorized(request: RequestBuilder, provider_id: &str) -> RequestBuilder {
 
 async fn response_error(response: reqwest::Response) -> String {
     let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let body = response.text().await.unwrap_or_default();
     if let Ok(value) = serde_json::from_str::<Value>(&body) {
         if let Some(message) = value
@@ -103,7 +108,26 @@ async fn response_error(response: reqwest::Response) -> String {
             .and_then(Value::as_str)
             .or_else(|| value.get("error").and_then(Value::as_str))
         {
-            return format!("服務回傳 {status}：{message}");
+            let error_type = value
+                .pointer("/error/metadata/error_type")
+                .and_then(Value::as_str);
+            let provider_code = value.pointer("/error/metadata/provider_code");
+            let mut details = Vec::new();
+            if let Some(error_type) = error_type {
+                details.push(format!("類型：{error_type}"));
+            }
+            if let Some(provider_code) = provider_code {
+                details.push(format!("上游代碼：{provider_code}"));
+            }
+            if let Some(retry_after) = retry_after.as_deref() {
+                details.push(format!("建議等待：{retry_after} 秒"));
+            }
+            let suffix = if details.is_empty() {
+                String::new()
+            } else {
+                format!("（{}）", details.join("；"))
+            };
+            return format!("服務回傳 {status}：{message}{suffix}");
         }
     }
     let summary: String = body.chars().take(240).collect();

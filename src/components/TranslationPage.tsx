@@ -11,6 +11,7 @@ type TranslationPageProps = {
   scale: number;
   layoutOverride?: PdfPageLayout;
   translationFontScale?: number;
+  translationLineHeightScale?: number;
   translations?: TranslatedBlock[];
   status?: TranslationStatus;
   error?: string;
@@ -27,9 +28,10 @@ type FittedTextBlockProps = {
   kind: "text" | "heading" | "caption" | "table" | "formula" | "artifact";
   textAlign?: "left" | "center" | "right";
   emphasis?: "bold";
+  lineHeightScale: number;
 };
 
-function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textAlign, emphasis }: FittedTextBlockProps) {
+function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textAlign, emphasis, lineHeightScale }: FittedTextBlockProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [overflowing, setOverflowing] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -59,7 +61,7 @@ function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textA
     };
     frame = requestAnimationFrame(fit);
     return () => cancelAnimationFrame(frame);
-  }, [fontSize, height, text, width]);
+  }, [fontSize, height, lineHeightScale, text, width]);
 
   return (
     <div
@@ -73,6 +75,7 @@ function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textA
         minHeight: height,
         maxHeight: expanded ? 320 : undefined,
         fontSize,
+        lineHeight: (kind === "table" ? 1.15 : 1.22) * lineHeightScale,
         textAlign,
         fontWeight: emphasis === "bold" ? 700 : undefined,
       }}
@@ -90,7 +93,7 @@ function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textA
   );
 }
 
-export function TranslationPage({ document, pageNumber, scale, layoutOverride, translationFontScale = 1.8, translations, status = "idle", error, onLayoutResolved }: TranslationPageProps) {
+export function TranslationPage({ document, pageNumber, scale, layoutOverride, translationFontScale = 1.8, translationLineHeightScale = 1, translations, status = "idle", error, onLayoutResolved }: TranslationPageProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLElement>(null);
   const [visible, setVisible] = useState(pageNumber <= 2);
@@ -216,6 +219,7 @@ export function TranslationPage({ document, pageNumber, scale, layoutOverride, t
               kind={block.kind}
               textAlign={block.textAlign}
               emphasis={block.emphasis}
+              lineHeightScale={translationLineHeightScale}
             />
           ))}
         </div>

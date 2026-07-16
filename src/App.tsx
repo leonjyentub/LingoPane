@@ -1,8 +1,9 @@
-import { ChangeEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ChangeEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { GlobalWorkerOptions, getDocument, type PDFDocumentLoadingTask, type PDFDocumentProxy } from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { PdfPage } from "./components/PdfPage";
 import { OutlineSidebar, type PdfOutlineItem } from "./components/OutlineSidebar";
 import { TranslationPage, type TranslatedBlock, type TranslationStatus } from "./components/TranslationPage";
@@ -95,6 +96,11 @@ type CachedDocumentData = {
   translations: Array<{ pageNumber: number; blocks: TranslatedBlock[] }>;
 };
 
+type DroppedPdf = {
+  fileName: string;
+  pdfBytes: number[];
+};
+
 type AnalysisSettings = Pick<ReaderSettings, "analysisMode" | "doclingPythonPath" | "doclingOcr">;
 
 type WebKitGestureEvent = Event & {
@@ -129,6 +135,14 @@ function loadSettings(): ReaderSettings {
     const saved = localStorage.getItem("parallel-pdf-settings");
     if (!saved) return initialSettings;
     const parsed = JSON.parse(saved) as Partial<ReaderSettings> & { settingsVersion?: number };
+    const savedProvider = parsed.provider as string | undefined;
+    if (savedProvider === "openrouter") {
+      parsed.provider = "openai-compatible";
+    } else if (savedProvider !== "omlx" && savedProvider !== "ollama" && savedProvider !== "openai-compatible") {
+      parsed.provider = initialSettings.provider;
+      parsed.baseUrl = initialSettings.baseUrl;
+      parsed.model = initialSettings.model;
+    }
     if (parsed.provider === "omlx" && parsed.baseUrl === "http://localhost:8000/v1") {
       parsed.baseUrl = providerDefaults.omlx;
     }
@@ -178,6 +192,7 @@ function App() {
   const [outlineLoading, setOutlineLoading] = useState(false);
   const [showOutline, setShowOutline] = useState(false);
   const [cacheNotice, setCacheNotice] = useState("");
+  const [draggingPdf, setDraggingPdf] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const loadingTaskRef = useRef<PDFDocumentLoadingTask | null>(null);
   const pdfBytesRef = useRef<Uint8Array | null>(null);
@@ -196,6 +211,7 @@ function App() {
   const unlockTimerRef = useRef<number | undefined>(undefined);
   const autoTranslateTimerRef = useRef<number | undefined>(undefined);
   const autoTranslatePageRef = useRef<(page: number) => void>(() => undefined);
+  const openPdfPathRef = useRef<(path: string) => void>(() => undefined);
   const translationJobsRef = useRef<Record<number, number>>({});
   const translationJobSequenceRef = useRef(0);
   const batchJobRef = useRef(0);
@@ -305,14 +321,10 @@ function App() {
     }
   }, []);
 
-  const openPdf = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
+  const loadPdf = async (sourceBytes: Uint8Array, nextFileName: string) => {
     setLoading(true);
     setError("");
     try {
-      const sourceBytes = new Uint8Array(await file.arrayBuffer());
       const data = sourceBytes.slice();
       await loadingTaskRef.current?.destroy();
       const loadingTask = getDocument({ data });
@@ -324,7 +336,7 @@ function App() {
       try {
         const opened = await invoke<OpenedCachedDocument>("open_cached_document", {
           pdfBytes: Array.from(sourceBytes),
-          fileName: file.name,
+          fileName: nextFileName,
           pageCount: nextDocument.numPages,
           maxDocuments: settings.cacheDocumentLimit,
         });
@@ -341,7 +353,7 @@ function App() {
         console.error("無法載入文件快取", cacheError);
       }
       setDocument(nextDocument);
-      setFileName(file.name);
+      setFileName(nextFileName);
       setOutline([]);
       setOutlineLoading(true);
       setShowOutline(false);
@@ -408,9 +420,119 @@ function App() {
       setError("無法讀取這份 PDF，請確認檔案未加密或損毀。");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const openPdf = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      await loadPdf(new Uint8Array(await file.arrayBuffer()), file.name);
+    } finally {
       event.target.value = "";
     }
   };
+
+  const openDroppedPdf = async (path: string) => {
+    setDraggingPdf(false);
+    setLoading(true);
+    setError("");
+    try {
+      const dropped = await invoke<DroppedPdf>("read_dropped_pdf", { path });
+      await loadPdf(new Uint8Array(dropped.pdfBytes), dropped.fileName);
+    } catch (cause) {
+      console.error(cause);
+      setError(errorMessage(cause));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  openPdfPathRef.current = (path: string) => {
+    void openDroppedPdf(path);
+  };
+
+  const closePdf = async () => {
+    setDocument(null);
+    setFileName("");
+    setError("");
+    setCacheNotice("");
+    setDraggingPdf(false);
+    setCurrentPage(1);
+    setZoom(1);
+    setOutline([]);
+    setOutlineLoading(false);
+    setShowOutline(false);
+    setTranslations({});
+    setTranslationStates({});
+    setEnhancedLayouts({});
+    setAnalysisState({ status: "idle", message: "快速版面分析" });
+    setBatchTranslation({ running: false, completed: 0, total: 0 });
+    batchJobRef.current += 1;
+    batchActivePageRef.current = undefined;
+    analysisRunRef.current += 1;
+    for (const translationId of Object.values(translationJobsRef.current)) {
+      void invoke("cancel_translation", { translationId }).catch(console.error);
+    }
+    translationJobsRef.current = {};
+    if (autoTranslateTimerRef.current) window.clearTimeout(autoTranslateTimerRef.current);
+    void invoke("cancel_docling_analysis").catch(console.error);
+    const loadingTask = loadingTaskRef.current;
+    loadingTaskRef.current = null;
+    pdfBytesRef.current = null;
+    documentCacheIdRef.current = "";
+    await loadingTask?.destroy().catch(console.error);
+  };
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWebview().onDragDropEvent((event) => {
+      if (document || loading) return;
+      if (event.payload.type === "over") {
+        setDraggingPdf(true);
+      } else if (event.payload.type === "leave") {
+        setDraggingPdf(false);
+      } else if (event.payload.type === "drop") {
+        setDraggingPdf(false);
+        const pdfPath = event.payload.paths.find((path) => path.toLocaleLowerCase().endsWith(".pdf"));
+        if (pdfPath) void openDroppedPdf(pdfPath);
+        else setError("請拖入 PDF 檔案");
+      }
+    }).then((stopListening) => {
+      if (disposed) stopListening();
+      else unlisten = stopListening;
+    }).catch(console.error);
+    return () => {
+      disposed = true;
+      unlisten?.();
+      setDraggingPdf(false);
+    };
+  }, [document, loading, settings]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const consumeOpenedPdf = async () => {
+      const paths = await invoke<string[]>("take_opened_pdf_paths");
+      const path = paths[paths.length - 1];
+      if (path) openPdfPathRef.current(path);
+    };
+    void listen("opened-pdf", () => {
+      void consumeOpenedPdf().catch(console.error);
+    }).then((stopListening) => {
+      if (disposed) {
+        stopListening();
+        return;
+      }
+      unlisten = stopListening;
+      void consumeOpenedPdf().catch(console.error);
+    }).catch(console.error);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   const findAnchor = (container: HTMLDivElement) => {
     const pages = Array.from(container.querySelectorAll<HTMLElement>("[data-page]"));
@@ -945,20 +1067,30 @@ function App() {
   const sourceLanguageLabel = settings.sourceLanguage === "auto" ? "自動偵測" : settings.sourceLanguage;
   const translatedPageCount = pageNumbers.filter((page) => Boolean(translations[page])).length;
   const allPagesTranslated = document !== null && translatedPageCount === document.numPages;
+  const startWindowDrag = (event: ReactMouseEvent<HTMLElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const command = event.detail >= 2 ? "toggle_window_maximize" : "start_window_drag";
+    void invoke(command).catch((cause) => {
+      console.error(cause);
+      setError(errorMessage(cause));
+    });
+  };
 
   return (
     <main className="app-shell">
-      <header className="titlebar" data-tauri-drag-region>
-        <div className="brand" data-tauri-drag-region>
+      <header className="titlebar" onMouseDown={startWindowDrag}>
+        <div className="brand">
           <span className="brand-mark">文</span>
           <span>LingoPane</span>
         </div>
-        <div className="document-title" data-tauri-drag-region>{fileName || "尚未開啟文件"}</div>
+        <div className="document-title">{fileName || "尚未開啟文件"}</div>
       </header>
 
       <section className="toolbar" aria-label="PDF 工具列">
         <input ref={fileInputRef} className="visually-hidden" type="file" accept="application/pdf,.pdf" onChange={openPdf} />
         <button className="primary-button" onClick={() => fileInputRef.current?.click()}>{loading ? "讀取中…" : "開啟 PDF"}</button>
+        {document && <button className="document-close-button" onClick={closePdf}>關閉 PDF</button>}
         <button
           className={`outline-toggle ${showOutline ? "is-active" : ""}`}
           disabled={!document}
@@ -1031,12 +1163,12 @@ function App() {
 
       <section ref={shellRef} className="reader-shell">
         {!document ? (
-          <div className="empty-state">
+          <div className={`empty-state ${draggingPdf ? "is-dragging" : ""}`} aria-live="polite">
             <div className="empty-icon">PDF</div>
-            <h1>並排閱讀，不中斷思緒</h1>
-            <p>開啟一份 PDF，左側閱讀原文，右側保留版面顯示翻譯。</p>
+            <h1>{draggingPdf ? "放開以開啟 PDF" : "並排閱讀，不中斷思緒"}</h1>
+            <p>{draggingPdf ? "檔案會在你的 Mac 上直接處理" : "將 PDF 拖到這裡，或從 Finder 選擇檔案。"}</p>
             <button className="primary-button large" onClick={() => fileInputRef.current?.click()}>選擇 PDF 檔案</button>
-            <span>檔案只會在你的 Mac 上處理</span>
+            <span>{loading ? "正在讀取 PDF…" : "左側原文、右側翻譯 · 檔案只會在你的 Mac 上處理"}</span>
           </div>
         ) : (
           <>
@@ -1068,6 +1200,7 @@ function App() {
                       scale={zoom}
                       layoutOverride={enhancedLayouts[page]}
                       translationFontScale={settings.translationFontScale}
+                      translationLineHeightScale={settings.targetLanguage === "zh-TW" ? 1.2 : 1}
                       translations={translations[page]}
                       status={translationStates[page]?.status}
                       error={translationStates[page]?.error}
@@ -1152,7 +1285,12 @@ function App() {
                   <label>Base URL<input value={settings.baseUrl} onChange={(event) => setSettings({ ...settings, baseUrl: event.target.value })} /></label>
                   <label>API Key
                     <div className="secret-field">
-                      <input type="password" placeholder={settings.provider === "openai-compatible" ? "留白會沿用 Keychain 內的 Key" : "本機服務通常不需要"} value={settings.apiKey} onChange={(event) => { setSettings({ ...settings, apiKey: event.target.value }); setApiKeyDirty(true); }} />
+                      <input
+                        type="password"
+                        placeholder={settings.provider === "openai-compatible" ? "留白會沿用 Keychain 內的 Key" : "本機服務通常不需要"}
+                        value={settings.apiKey}
+                        onChange={(event) => { setSettings({ ...settings, apiKey: event.target.value }); setApiKeyDirty(true); }}
+                      />
                       <button type="button" onClick={clearApiKey} disabled={settingsBusy}>清除</button>
                     </div>
                   </label>

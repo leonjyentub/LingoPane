@@ -13,7 +13,8 @@ button, input, select { font: inherit; }
 button { color: inherit; }
 
 .app-shell { height: 100%; display: flex; flex-direction: column; background: #f4f2ed; }
-.titlebar { height: 38px; flex: 0 0 38px; display: grid; grid-template-columns: 1fr 1.5fr 1fr; align-items: center; padding: 0 14px 0 82px; border-bottom: 1px solid #d8d5ce; background: rgba(249, 248, 244, .94); }
+.titlebar { height: 38px; flex: 0 0 38px; display: grid; grid-template-columns: 1fr 1.5fr 1fr; align-items: center; padding: 0 14px 0 82px; border-bottom: 1px solid #d8d5ce; background: rgba(249, 248, 244, .94); cursor: grab; user-select: none; }
+.titlebar:active { cursor: grabbing; }
 .brand { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 650; letter-spacing: -.01em; }
 .brand-mark { width: 23px; height: 23px; display: grid; place-items: center; border-radius: 6px; color: white; background: #c45f3c; font-family: ui-serif, Georgia, serif; }
 .document-title { overflow: hidden; text-align: center; text-overflow: ellipsis; white-space: nowrap; color: #77736b; font-size: 12px; }
@@ -25,6 +26,8 @@ button { color: inherit; }
 .outline-toggle { height: 28px; padding: 0 10px; border: 1px solid #d8d4cb; border-radius: 6px; color: #625e57; background: #fff; cursor: pointer; font-size: 11px; }
 .outline-toggle:hover:not(:disabled), .outline-toggle.is-active { color: #9f442b; border-color: #d6aa9b; background: #f7ebe6; }
 .outline-toggle:disabled { cursor: default; opacity: .4; }
+.document-close-button { height: 28px; padding: 0 9px; border: 1px solid #d8d4cb; border-radius: 6px; color: #766f66; background: #f6f4ef; cursor: pointer; font-size: 10px; white-space: nowrap; }
+.document-close-button:hover { color: #994a34; border-color: #d7b5a8; background: #f8ebe6; }
 .primary-button { padding: 7px 13px; border-radius: 7px; color: #fff; background: #b95435; font-size: 12px; font-weight: 620; }
 .primary-button:hover { background: #a9492d; }
 .primary-button:disabled, .secondary-button:disabled, .translate-button:disabled, .translate-all-button:disabled { cursor: default; opacity: .45; }
@@ -106,7 +109,9 @@ button { color: inherit; }
 .spinner { width: 17px; height: 17px; margin-bottom: 5px; border: 2px solid #d9c9c2; border-top-color: #b95435; border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.empty-state { margin: auto; display: flex; flex-direction: column; align-items: center; color: #615d55; }
+.empty-state { position: absolute; inset: 18px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 2px dashed transparent; border-radius: 14px; color: #615d55; transition: border-color .15s ease, background .15s ease, transform .15s ease; }
+.empty-state.is-dragging { border-color: #c87659; background: rgba(255, 248, 243, .82); transform: scale(.995); }
+.empty-state.is-dragging .empty-icon { color: #fff; border-color: #b95435; background: #b95435; transform: translateY(-3px); }
 .empty-icon { width: 72px; height: 88px; margin-bottom: 23px; display: grid; place-items: center; border: 1px solid #bbb6ad; border-radius: 4px 13px 4px 4px; color: #a44a30; background: #f9f7f2; box-shadow: 0 7px 20px rgba(50, 44, 34, .09); font-family: ui-serif, Georgia, serif; font-size: 17px; font-weight: 700; }
 .empty-state h1 { margin: 0 0 8px; color: #36332f; font-family: ui-serif, "Songti TC", Georgia, serif; font-size: 24px; font-weight: 620; letter-spacing: -.02em; }
 .empty-state p { margin: 0 0 22px; color: #77726a; font-size: 12px; }
