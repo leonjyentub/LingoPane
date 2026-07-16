@@ -40,6 +40,14 @@ pub struct CachedTranslation {
     pub blocks: Value,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearedCache {
+    pub documents: u32,
+    pub layouts: u32,
+    pub translations: u32,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheLayoutRequest {
@@ -144,6 +152,31 @@ fn touch_document(connection: &Connection, document_id: &str) -> Result<(), Stri
     Ok(())
 }
 
+fn clear_all_cached_documents(connection: &Connection) -> Result<ClearedCache, String> {
+    let documents = connection
+        .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+        .map_err(cache_error)?;
+    let layouts = connection
+        .query_row("SELECT COUNT(*) FROM page_layouts", [], |row| row.get(0))
+        .map_err(cache_error)?;
+    let translations = connection
+        .query_row("SELECT COUNT(*) FROM page_translations", [], |row| {
+            row.get(0)
+        })
+        .map_err(cache_error)?;
+    connection
+        .execute("DELETE FROM documents", [])
+        .map_err(cache_error)?;
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")
+        .map_err(cache_error)?;
+    Ok(ClearedCache {
+        documents,
+        layouts,
+        translations,
+    })
+}
+
 #[tauri::command]
 pub fn open_cached_document(
     app: tauri::AppHandle,
@@ -242,6 +275,12 @@ pub fn set_document_cache_limit(app: tauri::AppHandle, max_documents: u32) -> Re
 }
 
 #[tauri::command]
+pub fn clear_document_cache(app: tauri::AppHandle) -> Result<ClearedCache, String> {
+    let connection = open_connection(&app)?;
+    clear_all_cached_documents(&connection)
+}
+
+#[tauri::command]
 pub fn save_cached_layout(
     app: tauri::AppHandle,
     request: CacheLayoutRequest,
@@ -332,5 +371,51 @@ mod tests {
         assert_eq!(normalize_limit(0), 1);
         assert_eq!(normalize_limit(30), 30);
         assert_eq!(normalize_limit(999), 500);
+    }
+
+    #[test]
+    fn clears_documents_layouts_and_translations() {
+        let connection = Connection::open_in_memory().unwrap();
+        initialize(&connection).unwrap();
+        connection.execute(
+            "INSERT INTO documents (id, file_name, page_count, last_accessed) VALUES ('doc', 'test.pdf', 1, 1)",
+            [],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO page_layouts (document_id, analysis_key, page_number, layout_json, updated_at)
+             VALUES ('doc', 'fast', 1, '{}', 1)",
+            [],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO page_translations (document_id, analysis_key, translation_key, page_number, blocks_json, updated_at)
+             VALUES ('doc', 'fast', 'translation', 1, '[]', 1)",
+            [],
+        ).unwrap();
+
+        let cleared = clear_all_cached_documents(&connection).unwrap();
+        assert_eq!(cleared.documents, 1);
+        assert_eq!(cleared.layouts, 1);
+        assert_eq!(cleared.translations, 1);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM documents", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM page_layouts", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM page_translations", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 }

@@ -4,6 +4,12 @@
 
 以原文與翻譯並排閱讀為核心的 macOS PDF 閱讀器。應用程式使用 Tauri 2、React、TypeScript 與 PDF.js，目標是連接 oMLX、Ollama 或任何 OpenAI 相容端點，在本機保留 PDF 原有版面並同步閱讀位置。
 
+## 應用程式畫面
+
+![LingoPane 左右並排顯示 PDF 原文與繁體中文翻譯](docs/images/lingopane-side-by-side-translation.jpeg)
+
+左側保留原始 PDF，右側依原有頁面座標呈現翻譯結果；頁碼、頁內閱讀位置與縮放操作可在兩側同步。工具列依閱讀流程排列文件、目錄、版面分析、頁面導覽、同步捲動、翻譯與縮放功能，讓雙欄論文、圖片、圖說與段落可以在同一視窗中對照閱讀。
+
 ## 目前進度
 
 - 開啟並解析本機 PDF
@@ -214,7 +220,7 @@ rustup default stable
 ## 從 GitHub 全新安裝
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/leonjyentub/LingoPane.git
 cd LingoPane
 
 # 嚴格依照 package-lock.json 安裝 React、Vite 與 Tauri CLI 等套件

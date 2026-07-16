@@ -97,6 +97,12 @@ type CachedDocumentData = {
   translations: Array<{ pageNumber: number; blocks: TranslatedBlock[] }>;
 };
 
+type ClearedCache = {
+  documents: number;
+  layouts: number;
+  translations: number;
+};
+
 type DroppedPdf = {
   fileName: string;
   pdfBytes: number[];
@@ -116,8 +122,8 @@ function errorMessage(cause: unknown, fallback = "發生未預期的錯誤") {
 
 function analysisCacheKey(settings: Pick<ReaderSettings, "analysisMode" | "doclingOcr">) {
   return settings.analysisMode === "docling"
-    ? `layout-v3:docling:ocr-${settings.doclingOcr ? "on" : "off"}`
-    : "layout-v3:pdfjs";
+    ? `layout-v4:docling:ocr-${settings.doclingOcr ? "on" : "off"}`
+    : "layout-v4:pdfjs";
 }
 
 function translationCacheKey(settings: ReaderSettings) {
@@ -187,6 +193,7 @@ function App() {
   const [models, setModels] = useState<string[]>([]);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [connectionMessage, setConnectionMessage] = useState("");
+  const [cacheClearConfirming, setCacheClearConfirming] = useState(false);
   const [apiKeyDirty, setApiKeyDirty] = useState(false);
   const [translations, setTranslations] = useState<Record<number, TranslatedBlock[]>>({});
   const [translationStates, setTranslationStates] = useState<Record<number, PageTranslationState>>({});
@@ -721,6 +728,7 @@ function App() {
 
   const openSettings = () => {
     setConnectionMessage("");
+    setCacheClearConfirming(false);
     setShowSettings(true);
   };
 
@@ -746,6 +754,40 @@ function App() {
     await invoke("set_document_cache_limit", { maxDocuments: settings.cacheDocumentLimit });
     setSettings((current) => ({ ...current, apiKey: "" }));
     setApiKeyDirty(false);
+  };
+
+  const clearDatabaseCache = async () => {
+    setSettingsBusy(true);
+    setConnectionMessage(t("clearingCache"));
+    try {
+      const cleared = await invoke<ClearedCache>("clear_document_cache");
+      documentCacheIdRef.current = "";
+
+      const currentBytes = pdfBytesRef.current;
+      if (document && currentBytes) {
+        try {
+          const opened = await invoke<OpenedCachedDocument>("open_cached_document", {
+            pdfBytes: Array.from(currentBytes),
+            fileName,
+            pageCount: document.numPages,
+            maxDocuments: settings.cacheDocumentLimit,
+          });
+          documentCacheIdRef.current = opened.documentId;
+        } catch (cause) {
+          console.error("無法在清除後重新建立目前文件的快取索引", cause);
+        }
+      }
+
+      setTranslationStates((current) => Object.fromEntries(
+        Object.entries(current).map(([page, state]) => [page, { ...state, restoredFromCache: false }]),
+      ));
+      setCacheClearConfirming(false);
+      setConnectionMessage(t("cacheCleared", cleared));
+    } catch (cause) {
+      setConnectionMessage(errorMessage(cause));
+    } finally {
+      setSettingsBusy(false);
+    }
   };
 
   const testProvider = async () => {
@@ -1089,52 +1131,72 @@ function App() {
           <span className="brand-mark">文</span>
           <span>LingoPane</span>
         </div>
-        <div className="document-title">{fileName || t("noDocument")}</div>
+        <div className="document-heading">
+          <span className="document-title">{fileName || t("noDocument")}</span>
+          {document && (
+            <button
+              className="titlebar-document-close"
+              aria-label={t("closePdf")}
+              title={t("closePdf")}
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={closePdf}
+            ><span aria-hidden="true">×</span>{t("close")}</button>
+          )}
+        </div>
       </header>
 
       <section className="toolbar" aria-label={t("pdfToolbar")}>
         <input ref={fileInputRef} className="visually-hidden" type="file" accept="application/pdf,.pdf" onChange={openPdf} />
-        <button className="primary-button" onClick={() => fileInputRef.current?.click()}>{t(loading ? "loading" : "openPdf")}</button>
-        {document && <button className="document-close-button" onClick={closePdf}>{t("closePdf")}</button>}
-        <button className="outline-toggle" onClick={openSettings}>{t("settings")}</button>
-        <button
-          className={`outline-toggle ${showOutline ? "is-active" : ""}`}
-          disabled={!document}
-          onClick={() => setShowOutline((current) => !current)}
-          aria-expanded={showOutline}
-          aria-controls="pdf-outline"
-        >{t("outline")}</button>
-        {document && (
-          <span
-            className={`analysis-state is-${analysisState.status}`}
-            title={analysisState.message || t("fastAnalysis")}
-          >
-            {analysisState.status === "loading" ? `Docling · ${analysisState.pageCount ?? 0}/${analysisState.totalPages ?? document.numPages}` :
-              analysisState.status === "success" ? `Docling · ${t("pagesCount", { count: analysisState.pageCount ?? 0 })}` :
-              analysisState.status === "error" ? t("fastAnalysisFallback") : t("fastAnalysis")}
-          </span>
-        )}
-        <span className="toolbar-divider" />
-        <button className="icon-button" disabled={!document || currentPage <= 1} onClick={() => jumpToPage(currentPage - 1)} aria-label={t("previousPage")}>‹</button>
-        <label className="page-control">
-          <input
-            type="number"
-            min={1}
-            max={document?.numPages ?? 1}
-            value={currentPage}
+        <div className="toolbar-group document-tools">
+          <button className={document ? "toolbar-button" : "primary-button"} onClick={() => fileInputRef.current?.click()}>{t(loading ? "loading" : "openPdf")}</button>
+          <button
+            className={`toolbar-button outline-button ${showOutline ? "is-active" : ""}`}
             disabled={!document}
-            onChange={(event) => jumpToPage(Number(event.target.value))}
-          />
-          <span>/ {document?.numPages ?? 0}</span>
+            onClick={() => setShowOutline((current) => !current)}
+            aria-expanded={showOutline}
+            aria-controls="pdf-outline"
+            title={t("outline")}
+          ><span aria-hidden="true">▤</span><span className="toolbar-button-label">{t("outline")}</span></button>
+          {document && (
+            <span
+              className={`analysis-state is-${analysisState.status}`}
+              title={analysisState.message || t("fastAnalysis")}
+            >
+              {analysisState.status === "loading" ? `Docling ${analysisState.pageCount ?? 0}/${analysisState.totalPages ?? document.numPages}` :
+                analysisState.status === "success" ? "Docling ✓" :
+                analysisState.status === "error" ? "PDF.js" : "PDF.js"}
+            </span>
+          )}
+        </div>
+        <span className="toolbar-divider" />
+        <div className="toolbar-group page-navigation">
+          <button className="icon-button" disabled={!document || currentPage <= 1} onClick={() => jumpToPage(currentPage - 1)} aria-label={t("previousPage")}>‹</button>
+          <label className="page-control">
+            <input
+              type="number"
+              min={1}
+              max={document?.numPages ?? 1}
+              value={currentPage}
+              disabled={!document}
+              onChange={(event) => jumpToPage(Number(event.target.value))}
+            />
+            <span>/ {document?.numPages ?? 0}</span>
+          </label>
+          <button className="icon-button" disabled={!document || currentPage >= (document?.numPages ?? 0)} onClick={() => jumpToPage(currentPage + 1)} aria-label={t("nextPage")}>›</button>
+        </div>
+        <span className="toolbar-divider" />
+        <label className={`sync-control ${syncScroll ? "is-active" : ""}`} title={t("syncPosition")}>
+          <input type="checkbox" checked={syncScroll} onChange={(event) => setSyncScroll(event.target.checked)} />
+          <span className="sync-icon" aria-hidden="true">⇄</span>
+          <span className="sync-label">{t("syncScroll")}</span>
         </label>
-        <button className="icon-button" disabled={!document || currentPage >= (document?.numPages ?? 0)} onClick={() => jumpToPage(currentPage + 1)} aria-label={t("nextPage")}>›</button>
         <span className="toolbar-spacer" />
         {document && (
           <>
             <div className="translation-tools">
               <span className={`translation-state-dot is-${batchTranslation.running ? "loading" : currentTranslationStatus ?? "idle"}`} aria-hidden="true" />
               <span className="translation-summary" title={`${settings.provider} · ${settings.model || t("noModel")} · ${sourceLanguageLabel} → ${settings.targetLanguage}`}>
-                <strong>{settings.provider}</strong> · {settings.model || t("noModel")} · {sourceLanguageLabel} <span>→</span> {settings.targetLanguage}
+                {sourceLanguageLabel} <span>→</span> {settings.targetLanguage}
               </span>
               {batchTranslation.running ? (
                 <>
@@ -1148,21 +1210,31 @@ function App() {
                   ) : (
                     <button className="translate-button" disabled={!analysisReadyForPage(currentPage)} onClick={translateCurrentPage}>{t(translations[currentPage] ? "retranslate" : "translateCurrent")}</button>
                   )}
-                  <button className="translate-all-button" disabled={analysisState.status === "loading"} onClick={translateAllPages}>{t(allPagesTranslated ? "retranslateAll" : "translateAll")}</button>
+                  <details className="translation-menu">
+                    <summary aria-label={t("translateAll")} title={t("translateAll")}>⌄</summary>
+                    <div className="translation-menu-popover">
+                      <button
+                        disabled={analysisState.status === "loading"}
+                        onClick={(event) => {
+                          event.currentTarget.closest("details")?.removeAttribute("open");
+                          void translateAllPages();
+                        }}
+                      >{t(allPagesTranslated ? "retranslateAll" : "translateAll")}</button>
+                    </div>
+                  </details>
                 </>
               )}
             </div>
             <span className="toolbar-divider" />
           </>
         )}
-        <label className="sync-control" title={t("syncPosition")}>
-          <input type="checkbox" checked={syncScroll} onChange={(event) => setSyncScroll(event.target.checked)} />
-          <span>{t("syncScroll")}</span>
-        </label>
-        <span className="toolbar-divider" />
-        <button className="icon-button" disabled={!document || zoom <= 0.5} onClick={() => setZoom((value) => Math.max(0.5, value - 0.1))}>−</button>
-        <span className="zoom-value">{Math.round(zoom * 100)}%</span>
-        <button className="icon-button" disabled={!document || zoom >= 2} onClick={() => setZoom((value) => Math.min(2, value + 0.1))}>＋</button>
+        <div className="toolbar-group zoom-controls">
+          <button className="icon-button" disabled={!document || zoom <= 0.5} onClick={() => setZoom((value) => Math.max(0.5, value - 0.1))}>−</button>
+          <span className="zoom-value">{Math.round(zoom * 100)}%</span>
+          <button className="icon-button" disabled={!document || zoom >= 2} onClick={() => setZoom((value) => Math.min(2, value + 0.1))}>＋</button>
+        </div>
+        <span className="toolbar-divider settings-divider" />
+        <button className="toolbar-settings-button" onClick={openSettings} aria-label={t("settings")} title={t("settings")}>⚙︎</button>
       </section>
 
       {error && <div className="error-banner">{error}</div>}
@@ -1267,6 +1339,11 @@ function App() {
                   <div className="runtime-explanation">{t("doclingExplanation")}</div>
                 </>
               )}
+              {analysisState.status === "loading"
+                ? <button className="secondary-button settings-test-button" onClick={cancelDoclingAnalysis}>{t("stopDocling")}</button>
+                : settings.analysisMode === "docling" && <button className="secondary-button settings-test-button" onClick={testDocling} disabled={settingsBusy}>{t(settingsBusy ? "checking" : "testDocling")}</button>}
+
+              <div className="settings-section-title">{t("dataSection")}</div>
               <label>{t("cacheLimit")}
                 <input
                   type="number"
@@ -1281,9 +1358,25 @@ function App() {
                 />
                 <small className="field-help">{t("cacheHelp")}</small>
               </label>
-              {analysisState.status === "loading"
-                ? <button className="secondary-button settings-test-button" onClick={cancelDoclingAnalysis}>{t("stopDocling")}</button>
-                : settings.analysisMode === "docling" && <button className="secondary-button settings-test-button" onClick={testDocling} disabled={settingsBusy}>{t(settingsBusy ? "checking" : "testDocling")}</button>}
+              <div className="cache-management">
+                <div className="cache-management-copy">
+                  <strong>{t("databaseCache")}</strong>
+                  <small>{t("databaseCacheHelp")}</small>
+                </div>
+                {!cacheClearConfirming ? (
+                  <button className="danger-outline-button" onClick={() => setCacheClearConfirming(true)} disabled={settingsBusy}>
+                    {t("clearDatabaseCache")}
+                  </button>
+                ) : (
+                  <div className="cache-clear-confirmation" role="alert">
+                    <p>{t("clearCacheConfirm")}</p>
+                    <div>
+                      <button className="secondary-button" onClick={() => setCacheClearConfirming(false)} disabled={settingsBusy}>{t("cancelClearCache")}</button>
+                      <button className="danger-button" onClick={clearDatabaseCache} disabled={settingsBusy}>{t("confirmClearCache")}</button>
+                    </div>
+                  </div>
+                )}
+              </div>
 
               <div className="settings-section-title">{t("translationSection")}</div>
               <label>{t("serviceType")}

@@ -28,6 +28,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "infoplist/en.lproj/InfoPlist.strings": "en.lproj/InfoPlist.strings",
+      "infoplist/zh-Hant.lproj/InfoPlist.strings": "zh-Hant.lproj/InfoPlist.strings"
+    },
     "fileAssociations": [
       {
         "ext": ["pdf"],

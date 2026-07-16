@@ -13,6 +13,7 @@ pub fn run() {
             cache::open_cached_document,
             cache::load_cached_document,
             cache::set_document_cache_limit,
+            cache::clear_document_cache,
             cache::save_cached_layout,
             cache::save_cached_translation,
             docling::probe_docling,

@@ -4,6 +4,12 @@
 
 A macOS PDF reader centered on side-by-side reading of source text and translations. Built with Tauri 2, React, TypeScript, and PDF.js, LingoPane connects to oMLX, Ollama, or any OpenAI-compatible endpoint while preserving the original PDF layout and synchronizing reading positions locally.
 
+## Application Preview
+
+![LingoPane showing the source PDF and Traditional Chinese translation side by side](docs/images/lingopane-side-by-side-translation.jpeg)
+
+The original PDF remains on the left while translated content is rendered at the corresponding page coordinates on the right. Page navigation, in-page reading position, and zoom can stay synchronized across both panes. The toolbar follows the reading workflow, grouping document, outline, layout analysis, navigation, synchronized scrolling, translation, and zoom controls for direct comparison of multi-column papers, figures, captions, and paragraphs.
+
 ## Current Status
 
 - Open and parse local PDF files
@@ -214,7 +220,7 @@ Open a new Terminal window after installation and verify the version commands ag
 ## Fresh Installation from GitHub
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/leonjyentub/LingoPane.git
 cd LingoPane
 
 # Install React, Vite, Tauri CLI, and other packages exactly from package-lock.json

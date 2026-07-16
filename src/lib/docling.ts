@@ -174,6 +174,32 @@ function hasReliableDoclingGeometry(blocks: PdfTextBlock[]): boolean {
     const capacity = Math.max(1, block.width / glyphWidth) * Math.max(1, block.height / lineHeight);
     if (normalized.length >= 120 && normalized.length > capacity * 3.2) return false;
   }
+
+  const paragraphs = blocks.filter((block) =>
+    block.translatable
+    && block.kind === "text"
+    && comparableText(block.text).length >= 100,
+  );
+  for (let index = 0; index < paragraphs.length; index += 1) {
+    const block = paragraphs[index];
+    for (let candidateIndex = index + 1; candidateIndex < paragraphs.length; candidateIndex += 1) {
+      const candidate = paragraphs[candidateIndex];
+      const intersectionWidth = Math.max(0,
+        Math.min(block.left + block.width, candidate.left + candidate.width)
+        - Math.max(block.left, candidate.left));
+      const intersectionHeight = Math.max(0,
+        Math.min(block.top + block.height, candidate.top + candidate.height)
+        - Math.max(block.top, candidate.top));
+      const horizontalOverlap = intersectionWidth / Math.max(1, Math.min(block.width, candidate.width));
+      const verticalOverlap = intersectionHeight / Math.max(1, Math.min(block.height, candidate.height));
+
+      // Docling paragraphs can be aligned to the same oversized PDF.js block
+      // when containment text matching succeeds for several distinct items.
+      // The resulting translations overlap and independently shrink to very
+      // different sizes, so reject the whole page and use its PDF.js layout.
+      if (horizontalOverlap >= 0.65 && verticalOverlap >= 0.35) return false;
+    }
+  }
   return true;
 }
 

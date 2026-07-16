@@ -27,6 +27,7 @@ type FittedTextBlockProps = {
   width: number;
   height: number;
   fontSize: number;
+  minimumFontSize?: number;
   kind: "text" | "heading" | "caption" | "table" | "formula" | "artifact";
   textAlign?: "left" | "center" | "right";
   emphasis?: "bold";
@@ -34,7 +35,7 @@ type FittedTextBlockProps = {
   t: Translator;
 };
 
-function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textAlign, emphasis, lineHeightScale, t }: FittedTextBlockProps) {
+function FittedTextBlock({ text, left, top, width, height, fontSize, minimumFontSize, kind, textAlign, emphasis, lineHeightScale, t }: FittedTextBlockProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [overflowing, setOverflowing] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -44,7 +45,7 @@ function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textA
     if (!element) return;
     let frame = 0;
     let attempts = 0;
-    const minimum = Math.max(5.5, fontSize * 0.58);
+    const minimum = Math.max(5.5, minimumFontSize ?? fontSize * 0.58);
     setOverflowing(false);
     setExpanded(false);
     element.style.fontSize = `${fontSize}px`;
@@ -64,7 +65,7 @@ function FittedTextBlock({ text, left, top, width, height, fontSize, kind, textA
     };
     frame = requestAnimationFrame(fit);
     return () => cancelAnimationFrame(frame);
-  }, [fontSize, height, lineHeightScale, text, width]);
+  }, [fontSize, height, lineHeightScale, minimumFontSize, text, width]);
 
   return (
     <div
@@ -163,6 +164,18 @@ export function TranslationPage({ document, pageNumber, scale, layoutOverride, t
 
   const translatedById = new Map(translations?.map((block) => [block.id, block.text]) ?? []);
   const translated = status === "success" && translatedById.size > 0;
+  const bodyFontSamples = layout.blocks
+    .filter((block) => block.kind === "text" && block.translatable && block.fontSize > 0)
+    .map((block) => ({ fontSize: block.fontSize, weight: Math.max(1, block.width * block.height) }))
+    .sort((left, right) => left.fontSize - right.fontSize);
+  const totalBodyWeight = bodyFontSamples.reduce((total, sample) => total + sample.weight, 0);
+  let accumulatedBodyWeight = 0;
+  let bodyFontSize = 9;
+  for (const sample of bodyFontSamples) {
+    accumulatedBodyWeight += sample.weight;
+    bodyFontSize = sample.fontSize;
+    if (accumulatedBodyWeight >= totalBodyWeight / 2) break;
+  }
   const preservedSourceBlocks = layout.blocks.filter((block) =>
     block.kind === "formula" || (block.kind === "table" && !block.translatable),
   );
@@ -210,22 +223,30 @@ export function TranslationPage({ document, pageNumber, scale, layoutOverride, t
             ))}
           </div>
 
-          {layout.blocks.filter((block) => translatedById.has(block.id)).map((block) => (
-            <FittedTextBlock
-              key={block.id}
-              text={translatedById.get(block.id) ?? ""}
-              left={block.left * scale - 2}
-              top={block.top * scale - 2}
-              width={Math.max(24, block.width * scale + 4)}
-              height={Math.max(block.fontSize * scale * 1.25, block.height * scale + 4)}
-              fontSize={Math.max(7, block.fontSize * scale * translationFontScale)}
-              kind={block.kind}
-              textAlign={block.textAlign}
-              emphasis={block.emphasis}
-              lineHeightScale={translationLineHeightScale}
-              t={t}
-            />
-          ))}
+          {layout.blocks.filter((block) => translatedById.has(block.id)).map((block) => {
+            const bodyFontRatio = block.fontSize / Math.max(1, bodyFontSize);
+            const normalizedSourceFontSize = block.kind === "text" && bodyFontRatio >= 0.85 && bodyFontRatio <= 1.15
+              ? bodyFontSize
+              : block.fontSize;
+            const translatedFontSize = Math.max(7, normalizedSourceFontSize * scale * translationFontScale);
+            return (
+              <FittedTextBlock
+                key={block.id}
+                text={translatedById.get(block.id) ?? ""}
+                left={block.left * scale - 2}
+                top={block.top * scale - 2}
+                width={Math.max(24, block.width * scale + 4)}
+                height={Math.max(block.fontSize * scale * 1.25, block.height * scale + 4)}
+                fontSize={translatedFontSize}
+                minimumFontSize={block.kind === "text" ? translatedFontSize * 0.82 : undefined}
+                kind={block.kind}
+                textAlign={block.textAlign}
+                emphasis={block.emphasis}
+                lineHeightScale={translationLineHeightScale}
+                t={t}
+              />
+            );
+          })}
         </div>
       )}
 
