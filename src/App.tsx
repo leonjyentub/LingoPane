@@ -1185,11 +1185,11 @@ function App() {
           <button className="icon-button" disabled={!document || currentPage >= (document?.numPages ?? 0)} onClick={() => jumpToPage(currentPage + 1)} aria-label={t("nextPage")}>›</button>
         </div>
         <span className="toolbar-divider" />
-        <label className={`sync-control ${syncScroll ? "is-active" : ""}`} title={t("syncPosition")}>
-          <input type="checkbox" checked={syncScroll} onChange={(event) => setSyncScroll(event.target.checked)} />
-          <span className="sync-icon" aria-hidden="true">⇄</span>
-          <span className="sync-label">{t("syncScroll")}</span>
-        </label>
+        <div className="toolbar-group zoom-controls">
+          <button className="icon-button" disabled={!document || zoom <= 0.5} onClick={() => setZoom((value) => Math.max(0.5, value - 0.1))}>−</button>
+          <span className="zoom-value">{Math.round(zoom * 100)}%</span>
+          <button className="icon-button" disabled={!document || zoom >= 2} onClick={() => setZoom((value) => Math.min(2, value + 0.1))}>＋</button>
+        </div>
         <span className="toolbar-spacer" />
         {document && (
           <>
@@ -1228,11 +1228,11 @@ function App() {
             <span className="toolbar-divider" />
           </>
         )}
-        <div className="toolbar-group zoom-controls">
-          <button className="icon-button" disabled={!document || zoom <= 0.5} onClick={() => setZoom((value) => Math.max(0.5, value - 0.1))}>−</button>
-          <span className="zoom-value">{Math.round(zoom * 100)}%</span>
-          <button className="icon-button" disabled={!document || zoom >= 2} onClick={() => setZoom((value) => Math.min(2, value + 0.1))}>＋</button>
-        </div>
+        <label className={`sync-control ${syncScroll ? "is-active" : ""}`} title={t("syncPosition")}>
+          <input type="checkbox" checked={syncScroll} onChange={(event) => setSyncScroll(event.target.checked)} />
+          <span className="sync-icon" aria-hidden="true">⇄</span>
+          <span className="sync-label">{t("syncScroll")}</span>
+        </label>
         <span className="toolbar-divider settings-divider" />
         <button className="toolbar-settings-button" onClick={openSettings} aria-label={t("settings")} title={t("settings")}>⚙︎</button>
       </section>
@@ -1398,6 +1398,7 @@ function App() {
                   <button type="button" onClick={clearApiKey} disabled={settingsBusy}>{t("clear")}</button>
                 </div>
               </label>
+              <button className="secondary-button settings-test-button" onClick={testProvider} disabled={settingsBusy}>{t(settingsBusy ? "processing" : "testConnection")}</button>
               {models.length > 0 && (
                 <label>{t("detectedModels")}
                   <select value={models.includes(settings.model) ? settings.model : ""} onChange={(event) => setSettings({ ...settings, model: event.target.value })}>
@@ -1424,7 +1425,6 @@ function App() {
                   onChange={(event) => setSettings({ ...settings, translationFontScale: Math.max(0.8, Math.min(2, Number(event.target.value) || 1.8)) })}
                 />
               </label>
-              <button className="secondary-button settings-test-button" onClick={testProvider} disabled={settingsBusy}>{t(settingsBusy ? "processing" : "testConnection")}</button>
             </div>
 
             <div className={`settings-note ${connectionMessage ? "has-status" : ""}`}>
