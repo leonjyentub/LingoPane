@@ -137,6 +137,15 @@ button { color: inherit; }
 .empty-state h1 { margin: 0 0 8px; color: #36332f; font-family: ui-serif, "Songti TC", Georgia, serif; font-size: 24px; font-weight: 620; letter-spacing: -.02em; }
 .empty-state p { margin: 0 0 22px; color: #77726a; font-size: 12px; }
 .empty-state > span { margin-top: 12px; color: #97928a; font-size: 10px; }
+
+.recent-documents { margin-top: 32px; width: 100%; max-width: 360px; }
+.recent-documents h2 { margin: 0 0 10px; color: #77726a; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+.recent-documents ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.recent-document-item { width: 100%; padding: 8px 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid #e0ddd6; border-radius: 8px; background: #fff; cursor: pointer; text-align: left; transition: border-color .15s ease, background .15s ease; }
+.recent-document-item:hover:not(:disabled) { border-color: #d6aa9b; background: #fdf8f5; }
+.recent-document-item:disabled { cursor: default; opacity: .5; }
+.recent-document-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #36332f; font-size: 12px; font-weight: 500; }
+.recent-document-meta { flex: 0 0 auto; color: #97928a; font-size: 10px; }
 .error-banner { position: absolute; top: 94px; left: 50%; z-index: 20; transform: translateX(-50%); padding: 8px 13px; border: 1px solid #dcae9e; border-radius: 7px; color: #8c3c27; background: #fff4ef; font-size: 11px; box-shadow: 0 4px 15px rgba(60, 30, 20,.12); }
 .cache-notice { position: absolute; top: 94px; right: 14px; z-index: 18; padding: 6px 9px; border: 1px solid #bfd1c3; border-radius: 6px; color: #477054; background: rgba(239, 247, 241, .96); font-size: 9px; box-shadow: 0 3px 12px rgba(40, 60, 45, .09); }
 
@@ -161,6 +170,9 @@ button { color: inherit; }
 .settings-grid .checkbox-setting input { width: auto; height: auto; margin-top: 1px; accent-color: #b95435; }
 .settings-test-button { justify-self: start; }
 .runtime-explanation { padding: 10px 11px; border: 1px solid #e2ded5; border-radius: 7px; color: #6e6961; background: #f5f2ec; font-size: 10px; line-height: 1.55; }
+.python-status { padding: 8px 12px; border: 1px solid #e0ddd6; border-radius: 8px; background: #f9f7f2; }
+.python-status-label { display: block; color: #77726a; font-size: 10px; font-weight: 600; margin-bottom: 2px; }
+.python-status-value { display: block; color: #36332f; font-size: 11px; font-family: ui-monospace, monospace; word-break: break-all; }
 .cache-management { padding: 11px; display: grid; gap: 10px; border: 1px solid #e1dcd3; border-radius: 8px; background: #f7f4ef; }
 .cache-management-copy { display: grid; gap: 4px; }
 .cache-management-copy strong { color: #4e4942; font-size: 10px; }
@@ -182,6 +194,17 @@ button { color: inherit; }
 .settings-note { margin: 0 19px; padding: 10px 11px; border-radius: 7px; color: #777168; background: #f0ede6; font-size: 10px; line-height: 1.5; }
 .settings-note.has-status { color: #5e554d; background: #eee9df; }
 .modal-actions { padding: 16px 19px 18px; display: flex; justify-content: flex-end; gap: 8px; }
+
+.export-dialog { width: 420px; max-width: 90vw; max-height: 85vh; display: flex; flex-direction: column; border: 1px solid #d8d5ce; border-radius: 12px; background: #fbfaf7; box-shadow: 0 24px 64px rgba(40, 34, 26, .16); }
+.export-options { padding: 0 19px; display: flex; flex-direction: column; gap: 8px; }
+.export-option { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid #e0ddd6; border-radius: 8px; cursor: pointer; transition: border-color .15s ease, background .15s ease; }
+.export-option:hover { border-color: #d6aa9b; background: #fdf8f5; }
+.export-option.is-selected { border-color: #b95435; background: #fdf5f2; }
+.export-option input[type="radio"] { margin-top: 2px; accent-color: #b95435; }
+.export-option-content { display: flex; flex-direction: column; gap: 2px; }
+.export-option-content strong { color: #36332f; font-size: 12px; font-weight: 620; }
+.export-option-desc { color: #77726a; font-size: 10px; line-height: 1.4; }
+
 .visually-hidden { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
 @media (max-width: 1100px) {

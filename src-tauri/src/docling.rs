@@ -345,6 +345,7 @@ fn analyze_pdf_in_batches(
     do_ocr: bool,
     page_count: u32,
     priority_page: u32,
+    layout_model: String,
 ) -> Result<DocumentAnalysis, String> {
     if pdf_bytes.is_empty() {
         return Err("PDF 內容是空的".into());
@@ -383,6 +384,8 @@ fn analyze_pdf_in_batches(
             &ANALYSIS_BATCH_SIZE.to_string(),
             "--priority-page",
             &priority_page.to_string(),
+            "--layout-model",
+            &layout_model,
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
@@ -478,7 +481,9 @@ pub async fn analyze_pdf_with_docling(
     do_ocr: bool,
     page_count: u32,
     priority_page: u32,
+    layout_model: Option<String>,
 ) -> Result<DocumentAnalysis, String> {
+    let resolved_layout_model = layout_model.unwrap_or_else(|| "heron".into());
     tauri::async_runtime::spawn_blocking(move || {
         analyze_pdf_in_batches(
             app,
@@ -488,6 +493,7 @@ pub async fn analyze_pdf_with_docling(
             do_ocr,
             page_count,
             priority_page,
+            resolved_layout_model,
         )
     })
     .await

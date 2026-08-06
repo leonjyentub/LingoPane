@@ -287,11 +287,15 @@ fn assistant_content(response: &Value) -> Result<String, String> {
 }
 
 fn translate_gemma_language_name(code: &str) -> &str {
-    let base = code.split(['-', '_']).next().unwrap_or(code);
-    match base.to_ascii_lowercase().as_str() {
+    let lower = code.to_ascii_lowercase();
+    if lower == "zh-tw" || lower == "zh_hant" {
+        return "Traditional Chinese";
+    }
+    let base = lower.split(['-', '_']).next().unwrap_or(code);
+    match base {
         "en" => "English",
         "ja" => "Japanese",
-        "zh" => "Chinese",
+        "zh" => "Simplified Chinese",
         _ => code,
     }
 }
@@ -299,8 +303,17 @@ fn translate_gemma_language_name(code: &str) -> &str {
 fn translate_gemma_prompt(source_code: &str, target_code: &str, text: &str) -> String {
     let source_name = translate_gemma_language_name(source_code);
     let target_name = translate_gemma_language_name(target_code);
+    let target_hint = if target_code.to_ascii_lowercase().starts_with("zh") {
+        if target_code.to_ascii_lowercase() == "zh-tw" || target_code.to_ascii_lowercase() == "zh_hant" {
+            "\nIMPORTANT: You MUST output Traditional Chinese characters (繁體中文). Do NOT use Simplified Chinese characters."
+        } else {
+            "\nIMPORTANT: You MUST output Simplified Chinese characters (简体中文). Do NOT use Traditional Chinese characters."
+        }
+    } else {
+        ""
+    };
     format!(
-        "<bos><start_of_turn>user\nYou are a professional {source_name} ({source_code}) to {target_name} ({target_code}) translator. Your goal is to accurately convey the meaning and nuances of the original {source_name} text while adhering to {target_name} grammar, vocabulary, and cultural sensitivities.\nProduce only the {target_name} translation, without any additional explanations or commentary. Please translate the following {source_name} text into {target_name}:\n\n\n{}<end_of_turn>\n<start_of_turn>model\n",
+        "<bos><start_of_turn>user\nYou are a professional {source_name} ({source_code}) to {target_name} ({target_code}) translator. Your goal is to accurately convey the meaning and nuances of the original {source_name} text while adhering to {target_name} grammar, vocabulary, and cultural sensitivities.{target_hint}\nProduce only the {target_name} translation, without any additional explanations or commentary. Please translate the following {source_name} text into {target_name}:\n\n\n{}<end_of_turn>\n<start_of_turn>model\n",
         text.trim()
     )
 }
@@ -578,8 +591,15 @@ mod tests {
     #[test]
     fn renders_translate_gemma_native_prompt() {
         let prompt = translate_gemma_prompt("en", "zh-TW", "Hello");
-        assert!(prompt.contains("English (en) to Chinese (zh-TW) translator"));
+        assert!(prompt.contains("English (en) to Traditional Chinese (zh-TW) translator"));
+        assert!(prompt.contains("Traditional Chinese characters (繁體中文)"));
         assert!(prompt.contains("Hello<end_of_turn>"));
         assert!(prompt.ends_with("<start_of_turn>model\n"));
+    }
+
+    #[test]
+    fn renders_simplified_chinese_hint() {
+        let prompt = translate_gemma_prompt("en", "zh", "Hello");
+        assert!(prompt.contains("Simplified Chinese characters (简体中文)"));
     }
 }

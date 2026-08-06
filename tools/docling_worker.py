@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-WORKER_VERSION = "3"
+WORKER_VERSION = "4"
 SCHEMA_VERSION = 1
 
 
@@ -383,7 +383,7 @@ def document_to_contract(document: Any, input_path: Path, docling_version: str) 
     }
 
 
-def create_converter(do_ocr: bool) -> Any:
+def create_converter(do_ocr: bool, layout_model: str = "heron") -> Any:
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -391,6 +391,25 @@ def create_converter(do_ocr: bool) -> Any:
     options = PdfPipelineOptions()
     options.do_ocr = do_ocr
     options.do_table_structure = True
+
+    try:
+        from docling.datamodel.pipeline_options import LayoutOptions
+        from docling.datamodel.layout_model_specs import (  # type: ignore[import-untyped]
+            DOCLING_LAYOUT_HERON,
+            DOCLING_LAYOUT_EGRET_LARGE,
+            DOCLING_LAYOUT_EGRET_XLARGE,
+        )
+
+        model_specs = {
+            "heron": DOCLING_LAYOUT_HERON,
+            "egret-large": DOCLING_LAYOUT_EGRET_LARGE,
+            "egret-xlarge": DOCLING_LAYOUT_EGRET_XLARGE,
+        }
+        spec = model_specs.get(layout_model, DOCLING_LAYOUT_HERON)
+        options.layout_options = LayoutOptions(model_spec=spec)
+    except ImportError:
+        pass
+
     return DocumentConverter(
         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)}
     )
@@ -401,11 +420,12 @@ def analyze(
     do_ocr: bool,
     page_range: tuple[int, int] | None = None,
     converter: Any | None = None,
+    layout_model: str = "heron",
 ) -> dict[str, Any]:
     if not input_path.is_file():
         raise FileNotFoundError(f"PDF does not exist: {input_path}")
 
-    active_converter = converter or create_converter(do_ocr)
+    active_converter = converter or create_converter(do_ocr, layout_model)
     arguments = {"page_range": page_range} if page_range else {}
     result = active_converter.convert(input_path, **arguments)
     return document_to_contract(result.document, input_path, _docling_version())
@@ -439,8 +459,9 @@ def analyze_in_batches(
     page_count: int,
     batch_size: int,
     priority_page: int,
+    layout_model: str = "heron",
 ) -> None:
-    converter = create_converter(do_ocr)
+    converter = create_converter(do_ocr, layout_model)
     completed_pages = 0
     for batch_start, batch_end in prioritized_page_ranges(page_count, batch_size, priority_page):
         analysis = analyze(input_path, do_ocr, (batch_start, batch_end), converter)
@@ -465,6 +486,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--page-count", type=int)
     parser.add_argument("--batch-size", type=int, default=5)
     parser.add_argument("--priority-page", type=int, default=1)
+    parser.add_argument(
+        "--layout-model",
+        choices=["heron", "egret-large", "egret-xlarge"],
+        default="heron",
+    )
     args = parser.parse_args(argv)
 
     if args.probe:
@@ -481,9 +507,10 @@ def main(argv: list[str] | None = None) -> int:
                 args.page_count,
                 args.batch_size,
                 args.priority_page,
+                args.layout_model,
             )
         else:
-            _json_dump(analyze(args.input, args.ocr))
+            _json_dump(analyze(args.input, args.ocr, layout_model=args.layout_model))
         return 0
     except Exception as error:
         print(f"{type(error).__name__}: {error}", file=sys.stderr)

@@ -48,6 +48,16 @@ pub struct ClearedCache {
     pub translations: u32,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentDocument {
+    pub document_id: String,
+    pub file_name: String,
+    pub file_path: String,
+    pub page_count: u32,
+    pub last_accessed: i64,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheLayoutRequest {
@@ -105,6 +115,7 @@ fn initialize(connection: &Connection) -> Result<(), String> {
          CREATE TABLE IF NOT EXISTS documents (
              id TEXT PRIMARY KEY,
              file_name TEXT NOT NULL,
+             file_path TEXT DEFAULT '',
              page_count INTEGER NOT NULL,
              last_accessed INTEGER NOT NULL
          );
@@ -125,9 +136,20 @@ fn initialize(connection: &Connection) -> Result<(), String> {
              updated_at INTEGER NOT NULL,
              PRIMARY KEY (document_id, analysis_key, translation_key, page_number)
          );
-         CREATE INDEX IF NOT EXISTS documents_last_accessed_idx ON documents(last_accessed DESC);",
+         CREATE INDEX IF NOT EXISTS documents_last_accessed_idx ON documents(last_accessed DESC);
+         PRAGMA table_info(documents);",
         )
-        .map_err(cache_error)
+        .map_err(cache_error)?;
+    // Add file_path column if missing (migration for existing databases)
+    let has_file_path: bool = connection
+        .prepare("SELECT file_path FROM documents LIMIT 0")
+        .is_ok();
+    if !has_file_path {
+        connection
+            .execute_batch("ALTER TABLE documents ADD COLUMN file_path TEXT DEFAULT '';")
+            .map_err(cache_error)?;
+    }
+    Ok(())
 }
 
 fn prune_documents(connection: &Connection, limit: u32) -> Result<(), String> {
@@ -182,6 +204,7 @@ pub fn open_cached_document(
     app: tauri::AppHandle,
     pdf_bytes: Vec<u8>,
     file_name: String,
+    file_path: Option<String>,
     page_count: u32,
     max_documents: u32,
 ) -> Result<OpenedCachedDocument, String> {
@@ -190,15 +213,17 @@ pub fn open_cached_document(
     }
     let document_id = format!("{:x}", Sha256::digest(&pdf_bytes));
     let connection = open_connection(&app)?;
+    let resolved_path = file_path.unwrap_or_default();
     connection
         .execute(
-            "INSERT INTO documents (id, file_name, page_count, last_accessed)
-         VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO documents (id, file_name, file_path, page_count, last_accessed)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(id) DO UPDATE SET
              file_name = excluded.file_name,
+             file_path = CASE WHEN excluded.file_path != '' THEN excluded.file_path ELSE documents.file_path END,
              page_count = excluded.page_count,
              last_accessed = excluded.last_accessed",
-            params![document_id, file_name, page_count, unix_timestamp()?],
+            params![document_id, file_name, resolved_path, page_count, unix_timestamp()?],
         )
         .map_err(cache_error)?;
     prune_documents(&connection, max_documents)?;
@@ -278,6 +303,38 @@ pub fn set_document_cache_limit(app: tauri::AppHandle, max_documents: u32) -> Re
 pub fn clear_document_cache(app: tauri::AppHandle) -> Result<ClearedCache, String> {
     let connection = open_connection(&app)?;
     clear_all_cached_documents(&connection)
+}
+
+#[tauri::command]
+pub fn list_recent_documents(
+    app: tauri::AppHandle,
+    limit: u32,
+) -> Result<Vec<RecentDocument>, String> {
+    let connection = open_connection(&app)?;
+    let limit = limit.clamp(1, 50);
+    let mut statement = connection
+        .prepare(
+            "SELECT id, file_name, COALESCE(file_path, ''), page_count, last_accessed
+             FROM documents
+             WHERE COALESCE(file_path, '') != ''
+             ORDER BY last_accessed DESC
+             LIMIT ?1",
+        )
+        .map_err(cache_error)?;
+    let documents = statement
+        .query_map(params![limit], |row| {
+            Ok(RecentDocument {
+                document_id: row.get(0)?,
+                file_name: row.get(1)?,
+                file_path: row.get(2)?,
+                page_count: row.get(3)?,
+                last_accessed: row.get(4)?,
+            })
+        })
+        .map_err(cache_error)?
+        .filter_map(|row| row.ok())
+        .collect();
+    Ok(documents)
 }
 
 #[tauri::command]

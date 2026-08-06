@@ -2,6 +2,7 @@ mod cache;
 mod docling;
 mod files;
 mod llm;
+mod renderer;
 mod window_controls;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -14,6 +15,7 @@ pub fn run() {
             cache::load_cached_document,
             cache::set_document_cache_limit,
             cache::clear_document_cache,
+            cache::list_recent_documents,
             cache::save_cached_layout,
             cache::save_cached_translation,
             docling::probe_docling,
@@ -26,6 +28,8 @@ pub fn run() {
             llm::test_connection,
             llm::cancel_translation,
             llm::translate_blocks,
+            renderer::render_translated_pdf,
+            renderer::cancel_pdf_render,
             window_controls::start_window_drag,
             window_controls::toggle_window_maximize
         ])

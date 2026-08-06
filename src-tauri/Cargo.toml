@@ -27,3 +27,4 @@ keyring = { version = "4.1.4", default-features = false, features = ["apple-nati
 futures-util = "0.3.32"
 rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.10"
+libc = "0.2"

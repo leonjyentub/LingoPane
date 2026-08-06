@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { PdfPage } from "./components/PdfPage";
 import { OutlineSidebar, type PdfOutlineItem } from "./components/OutlineSidebar";
+import { ExportDialog, type RenderMode } from "./components/ExportDialog";
 import { TranslationPage, type TranslatedBlock, type TranslationStatus } from "./components/TranslationPage";
 import { buildDoclingLayouts, type AnalysisMode, type DoclingStatus, type DocumentAnalysis } from "./lib/docling";
 import { getPageLayout } from "./lib/pdfLayout";
@@ -25,6 +26,8 @@ type ReaderSettings = {
   targetLanguage: string;
   translationFontScale: number;
   analysisMode: AnalysisMode;
+  layoutModel: "heron" | "egret-large" | "egret-xlarge";
+  renderMode: RenderMode;
   doclingPythonPath: string;
   doclingOcr: boolean;
   cacheDocumentLimit: number;
@@ -37,7 +40,7 @@ const providerDefaults: Record<Provider, string> = {
   "openai-compatible": "https://api.openai.com/v1",
 };
 
-const settingsVersion = 5;
+const settingsVersion = 7;
 
 const initialSettings: ReaderSettings = {
   provider: "omlx",
@@ -48,6 +51,8 @@ const initialSettings: ReaderSettings = {
   targetLanguage: "zh-TW",
   translationFontScale: 1.8,
   analysisMode: "fast",
+  layoutModel: "egret-large",
+  renderMode: "adaptive",
   doclingPythonPath: "",
   doclingOcr: false,
   cacheDocumentLimit: 30,
@@ -108,7 +113,15 @@ type DroppedPdf = {
   pdfBytes: number[];
 };
 
-type AnalysisSettings = Pick<ReaderSettings, "analysisMode" | "doclingPythonPath" | "doclingOcr">;
+type RecentDocument = {
+  documentId: string;
+  fileName: string;
+  filePath: string;
+  pageCount: number;
+  lastAccessed: number;
+};
+
+type AnalysisSettings = Pick<ReaderSettings, "analysisMode" | "layoutModel" | "doclingPythonPath" | "doclingOcr">;
 
 type WebKitGestureEvent = Event & {
   scale?: number;
@@ -120,10 +133,10 @@ function errorMessage(cause: unknown, fallback = "發生未預期的錯誤") {
   return fallback;
 }
 
-function analysisCacheKey(settings: Pick<ReaderSettings, "analysisMode" | "doclingOcr">) {
+function analysisCacheKey(settings: Pick<ReaderSettings, "analysisMode" | "doclingOcr" | "layoutModel">) {
   return settings.analysisMode === "docling"
-    ? `layout-v4:docling:ocr-${settings.doclingOcr ? "on" : "off"}`
-    : "layout-v4:pdfjs";
+    ? `layout-v5:docling:ocr-${settings.doclingOcr ? "on" : "off"}:layout-${settings.layoutModel}`
+    : "layout-v5:pdfjs";
 }
 
 function translationCacheKey(settings: ReaderSettings) {
@@ -160,6 +173,12 @@ function loadSettings(): ReaderSettings {
     }
     if (parsed.analysisMode !== "fast" && parsed.analysisMode !== "docling") {
       parsed.analysisMode = initialSettings.analysisMode;
+    }
+    if (parsed.layoutModel !== "heron" && parsed.layoutModel !== "egret-large" && parsed.layoutModel !== "egret-xlarge") {
+      parsed.layoutModel = initialSettings.layoutModel;
+    }
+    if (parsed.renderMode !== "faithful" && parsed.renderMode !== "adaptive" && parsed.renderMode !== "bilingual") {
+      parsed.renderMode = initialSettings.renderMode;
     }
     if (typeof parsed.doclingPythonPath !== "string") parsed.doclingPythonPath = "";
     if (typeof parsed.doclingOcr !== "boolean") parsed.doclingOcr = initialSettings.doclingOcr;
@@ -205,6 +224,10 @@ function App() {
   const [showOutline, setShowOutline] = useState(false);
   const [cacheNotice, setCacheNotice] = useState("");
   const [draggingPdf, setDraggingPdf] = useState(false);
+  const [recentDocuments, setRecentDocuments] = useState<RecentDocument[]>([]);
+  const [exportingPdf, setExportingPdf] = useState(false);
+  const [showExportDialog, setShowExportDialog] = useState(false);
+  const [selectedRenderMode, setSelectedRenderMode] = useState<RenderMode>("adaptive");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const loadingTaskRef = useRef<PDFDocumentLoadingTask | null>(null);
   const pdfBytesRef = useRef<Uint8Array | null>(null);
@@ -213,6 +236,7 @@ function App() {
   const analysisRunRef = useRef(0);
   const activeAnalysisSettingsRef = useRef<AnalysisSettings>({
     analysisMode: settings.analysisMode,
+    layoutModel: settings.layoutModel,
     doclingPythonPath: settings.doclingPythonPath.trim(),
     doclingOcr: settings.doclingOcr,
   });
@@ -252,15 +276,19 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [cacheNotice]);
 
+  useEffect(() => {
+    void invoke<RecentDocument[]>("list_recent_documents", { limit: 10 }).then(setRecentDocuments).catch(console.error);
+  }, []);
+
   const runDoclingAnalysis = useCallback(async (
     nextDocument: PDFDocumentProxy,
     pdfBytes: Uint8Array,
-    options: Pick<ReaderSettings, "doclingPythonPath" | "doclingOcr">,
+    options: Pick<ReaderSettings, "doclingPythonPath" | "doclingOcr" | "layoutModel">,
     priorityPage: number,
   ) => {
     const run = ++analysisRunRef.current;
     const cacheDocumentId = documentCacheIdRef.current;
-    const cacheAnalysisKey = analysisCacheKey({ analysisMode: "docling", doclingOcr: options.doclingOcr });
+    const cacheAnalysisKey = analysisCacheKey({ analysisMode: "docling", doclingOcr: options.doclingOcr, layoutModel: options.layoutModel });
     await invoke("cancel_docling_analysis").catch(() => false);
     if (analysisRunRef.current !== run) return;
     setEnhancedLayouts({});
@@ -305,6 +333,7 @@ function App() {
         doOcr: options.doclingOcr,
         pageCount: nextDocument.numPages,
         priorityPage,
+        layoutModel: options.layoutModel,
       });
       workerCompleted = true;
       const layouts = await buildDoclingLayouts(nextDocument, analysis);
@@ -339,7 +368,7 @@ function App() {
     }
   }, [t]);
 
-  const loadPdf = async (sourceBytes: Uint8Array, nextFileName: string) => {
+  const loadPdf = async (sourceBytes: Uint8Array, nextFileName: string, filePath?: string) => {
     setLoading(true);
     setError("");
     setCacheNotice("");
@@ -356,6 +385,7 @@ function App() {
         const opened = await invoke<OpenedCachedDocument>("open_cached_document", {
           pdfBytes: Array.from(sourceBytes),
           fileName: nextFileName,
+          filePath: filePath ?? "",
           pageCount: nextDocument.numPages,
           maxDocuments: settings.cacheDocumentLimit,
         });
@@ -408,6 +438,7 @@ function App() {
       void invoke("cancel_docling_analysis");
       activeAnalysisSettingsRef.current = {
         analysisMode: settings.analysisMode,
+        layoutModel: settings.layoutModel,
         doclingPythonPath: settings.doclingPythonPath.trim(),
         doclingOcr: settings.doclingOcr,
       };
@@ -458,7 +489,7 @@ function App() {
     setError("");
     try {
       const dropped = await invoke<DroppedPdf>("read_dropped_pdf", { path });
-      await loadPdf(new Uint8Array(dropped.pdfBytes), dropped.fileName);
+      await loadPdf(new Uint8Array(dropped.pdfBytes), dropped.fileName, path);
     } catch (cause) {
       console.error(cause);
       setError(errorMessage(cause));
@@ -469,6 +500,21 @@ function App() {
 
   openPdfPathRef.current = (path: string) => {
     void openDroppedPdf(path);
+  };
+
+  const openRecentDocument = async (doc: RecentDocument) => {
+    if (!doc.filePath) return;
+    setLoading(true);
+    setError("");
+    try {
+      const dropped = await invoke<DroppedPdf>("read_dropped_pdf", { path: doc.filePath });
+      await loadPdf(new Uint8Array(dropped.pdfBytes), dropped.fileName, doc.filePath);
+    } catch (cause) {
+      console.error(cause);
+      setError(errorMessage(cause));
+    } finally {
+      setLoading(false);
+    }
   };
 
   const closePdf = async () => {
@@ -501,6 +547,7 @@ function App() {
     pdfBytesRef.current = null;
     documentCacheIdRef.current = "";
     await loadingTask?.destroy().catch(console.error);
+    void invoke<RecentDocument[]>("list_recent_documents", { limit: 10 }).then(setRecentDocuments).catch(console.error);
   };
 
   useEffect(() => {
@@ -856,11 +903,13 @@ function App() {
       const currentBytes = pdfBytesRef.current;
       const nextAnalysisSettings: AnalysisSettings = {
         analysisMode: settings.analysisMode,
+        layoutModel: settings.layoutModel,
         doclingPythonPath: settings.doclingPythonPath.trim(),
         doclingOcr: settings.doclingOcr,
       };
       const active = activeAnalysisSettingsRef.current;
       const analysisSettingsChanged = active.analysisMode !== nextAnalysisSettings.analysisMode
+        || active.layoutModel !== nextAnalysisSettings.layoutModel
         || active.doclingPythonPath !== nextAnalysisSettings.doclingPythonPath
         || active.doclingOcr !== nextAnalysisSettings.doclingOcr;
       activeAnalysisSettingsRef.current = nextAnalysisSettings;
@@ -1051,6 +1100,67 @@ function App() {
     setBatchTranslation((current) => ({ ...current, running: false, currentPage: undefined }));
   };
 
+  const exportPdf = async (mode: RenderMode) => {
+    if (!document || !pdfBytesRef.current) return;
+    setExportingPdf(true);
+    setShowExportDialog(false);
+    try {
+      const allTranslations: Record<string, string> = {};
+      const renderPages: Array<{ pageNumber: number; blocks: Array<{ id: string; sourceBBox: { x: number; y: number; width: number; height: number }; sourceStyle: { fontSize: number }; type: string; columnId: string }> }> = [];
+
+      for (let pageNum = 1; pageNum <= document.numPages; pageNum++) {
+        const layout = enhancedLayouts[pageNum];
+        const pageTranslations = translations[pageNum];
+        if (!layout) continue;
+
+        const blocks = layout.blocks
+          .filter((b) => b.translatable && b.kind !== "formula" && b.kind !== "artifact")
+          .map((b) => {
+            if (pageTranslations) {
+              const translated = pageTranslations.find((t) => t.id === b.id);
+              if (translated) allTranslations[b.id] = translated.text;
+            }
+            return {
+              id: b.id,
+              sourceBBox: { x: b.left, y: b.top, width: b.width, height: b.height },
+              sourceStyle: { fontSize: b.fontSize },
+              type: b.kind === "heading" ? "heading" : b.kind === "caption" ? "caption" : b.kind === "table" ? "table" : "paragraph",
+              columnId: b.left < (layout.width / 2) ? "left" : "right",
+            };
+          });
+
+        renderPages.push({ pageNumber: pageNum, blocks });
+      }
+
+      if (Object.keys(allTranslations).length === 0) {
+        setError(t("noTranslationsToExport"));
+        return;
+      }
+
+      const result = await invoke<number[]>("render_translated_pdf", {
+        request: {
+          pdfBytes: Array.from(pdfBytesRef.current),
+          pages: renderPages,
+          translations: allTranslations,
+          mode,
+          fontScale: settings.translationFontScale * 0.5,
+        },
+      });
+
+      const blob = new Blob([new Uint8Array(result)], { type: "application/pdf" });
+      const url = URL.createObjectURL(blob);
+      const link = window.document.createElement("a");
+      link.href = url;
+      link.download = fileName.replace(/\.pdf$/i, "") + `-translated-${mode}.pdf`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (cause) {
+      setError(errorMessage(cause, t("exportFailed")));
+    } finally {
+      setExportingPdf(false);
+    }
+  };
+
   autoTranslatePageRef.current = (page: number) => {
     const state = translationStates[page]?.status;
     if (!document
@@ -1226,6 +1336,13 @@ function App() {
               )}
             </div>
             <span className="toolbar-divider" />
+            <button
+              className="toolbar-button"
+              disabled={!document || exportingPdf || Object.keys(translations).length === 0}
+              onClick={() => setShowExportDialog(true)}
+              title={t("exportPdf")}
+            >{exportingPdf ? t("exportingPdf") : t("exportPdf")}</button>
+            <span className="toolbar-divider" />
           </>
         )}
         <label className={`sync-control ${syncScroll ? "is-active" : ""}`} title={t("syncPosition")}>
@@ -1248,6 +1365,26 @@ function App() {
             <p>{t(draggingPdf ? "localProcessing" : "emptyHint")}</p>
             <button className="primary-button large" onClick={() => fileInputRef.current?.click()}>{t("choosePdf")}</button>
             <span>{t(loading ? "readingPdf" : "privacyHint")}</span>
+            {recentDocuments.length > 0 && (
+              <div className="recent-documents">
+                <h2>{t("recentDocuments")}</h2>
+                <ul>
+                  {recentDocuments.map((doc) => (
+                    <li key={doc.documentId}>
+                      <button
+                        className="recent-document-item"
+                        onClick={() => openRecentDocument(doc)}
+                        disabled={!doc.filePath}
+                        title={doc.filePath || doc.fileName}
+                      >
+                        <span className="recent-document-name">{doc.fileName}</span>
+                        <span className="recent-document-meta">{t("pagesCount", { count: doc.pageCount })}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         ) : (
           <>
@@ -1324,17 +1461,21 @@ function App() {
               </label>
               {settings.analysisMode === "docling" && (
                 <>
-                  <label>{t("pythonPath")}
-                    <input
-                      placeholder={t("pythonPlaceholder")}
-                      value={settings.doclingPythonPath}
-                      onChange={(event) => setSettings({ ...settings, doclingPythonPath: event.target.value })}
-                    />
-                    <small className="field-help">{t("pythonHelp")}</small>
-                  </label>
+                  <div className="python-status">
+                    <span className="python-status-label">{t("pythonEnvironment")}</span>
+                    <span className="python-status-value">{t("doclingRuntimeAuto")}</span>
+                  </div>
                   <label className="checkbox-setting">
                     <input type="checkbox" checked={settings.doclingOcr} onChange={(event) => setSettings({ ...settings, doclingOcr: event.target.checked })} />
                     <span>{t("enableOcr")}</span>
+                  </label>
+                  <label>{t("layoutModel")}
+                    <select value={settings.layoutModel} onChange={(event) => setSettings({ ...settings, layoutModel: event.target.value as ReaderSettings["layoutModel"] })}>
+                      <option value="heron">{t("layoutModelHeron")}</option>
+                      <option value="egret-large">{t("layoutModelEgretLarge")}</option>
+                      <option value="egret-xlarge">{t("layoutModelEgretXLarge")}</option>
+                    </select>
+                    <small className="field-help">{t("layoutModelHelp")}</small>
                   </label>
                   <div className="runtime-explanation">{t("doclingExplanation")}</div>
                 </>
@@ -1425,6 +1566,14 @@ function App() {
                   onChange={(event) => setSettings({ ...settings, translationFontScale: Math.max(0.8, Math.min(2, Number(event.target.value) || 1.8)) })}
                 />
               </label>
+              <label>{t("renderMode")}
+                <select value={settings.renderMode} onChange={(event) => setSettings({ ...settings, renderMode: event.target.value as RenderMode })}>
+                  <option value="faithful">{t("renderFaithful")}</option>
+                  <option value="adaptive">{t("renderAdaptive")}</option>
+                  <option value="bilingual">{t("renderBilingual")}</option>
+                </select>
+                <small className="field-help">{t("renderModeHelp")}</small>
+              </label>
             </div>
 
             <div className={`settings-note ${connectionMessage ? "has-status" : ""}`}>
@@ -1435,6 +1584,17 @@ function App() {
             </div>
           </section>
         </div>
+      )}
+      {showExportDialog && (
+        <ExportDialog
+          renderMode={selectedRenderMode}
+          onModeChange={setSelectedRenderMode}
+          onExport={() => exportPdf(selectedRenderMode)}
+          onCancel={() => setShowExportDialog(false)}
+          exporting={exportingPdf}
+          hasTranslations={Object.keys(translations).length > 0}
+          t={t}
+        />
       )}
     </main>
   );
