@@ -5,9 +5,10 @@ use std::{
     process::{Command, Stdio},
     sync::atomic::{AtomicU32, Ordering},
 };
+use tauri::Manager;
+use tauri_plugin_opener::OpenerExt;
 
 const RENDERER_SOURCE: &str = include_str!("../../tools/pdf_renderer.py");
-const BABELDOC_SOURCE: &str = include_str!("../../tools/babeldoc_worker.py");
 static ACTIVE_RENDERER_PID: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -18,6 +19,7 @@ pub struct RenderRequest {
     pub translations: std::collections::HashMap<String, String>,
     pub mode: String,
     pub font_scale: f64,
+    pub file_name: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -33,6 +35,8 @@ pub struct RenderBlock {
     pub id: String,
     pub source_bbox: BBox,
     pub source_style: SourceStyle,
+    #[serde(default)]
+    pub mask_rects: Vec<BBox>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -151,14 +155,9 @@ pub fn render_pdf(request: &RenderRequest) -> Result<Vec<u8>, String> {
 
     let _ = terminate_active_renderer();
 
-    let worker_source = match request.mode.as_str() {
-        "adaptive" => BABELDOC_SOURCE,
-        _ => RENDERER_SOURCE,
-    };
-
     let mut child = Command::new(&python)
         .arg("-c")
-        .arg(worker_source)
+        .arg(RENDERER_SOURCE)
         .args([
             "--mode",
             &request.mode,
@@ -207,11 +206,68 @@ pub fn render_pdf(request: &RenderRequest) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
+fn sanitize_file_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | ':' | '\0' => '-',
+            other => other,
+        })
+        .collect();
+    let cleaned = cleaned.trim().trim_start_matches('.').to_string();
+    if cleaned.is_empty() {
+        "translated.pdf".to_string()
+    } else if cleaned.to_lowercase().ends_with(".pdf") {
+        cleaned
+    } else {
+        format!("{cleaned}.pdf")
+    }
+}
+
+fn unique_path(path: PathBuf) -> PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let parent = path.parent().map(PathBuf::from).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("translated");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("pdf");
+    for index in 2..1000 {
+        let candidate = parent.join(format!("{stem} ({index}).{extension}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    path
+}
+
 #[tauri::command]
-pub async fn render_translated_pdf(request: RenderRequest) -> Result<Vec<u8>, String> {
-    tauri::async_runtime::spawn_blocking(move || render_pdf(&request))
+pub async fn render_translated_pdf(
+    app: tauri::AppHandle,
+    request: RenderRequest,
+) -> Result<String, String> {
+    let file_name = sanitize_file_name(&request.file_name);
+    let bytes = tauri::async_runtime::spawn_blocking(move || render_pdf(&request))
         .await
-        .map_err(|e| format!("PDF 渲染工作執行失敗：{e}"))?
+        .map_err(|e| format!("PDF 渲染工作執行失敗：{e}"))??;
+
+    let download_dir = app
+        .path()
+        .download_dir()
+        .map_err(|e| format!("無法取得下載目錄：{e}"))?;
+    let output_path = unique_path(download_dir.join(&file_name));
+    std::fs::write(&output_path, &bytes).map_err(|e| format!("無法寫入翻譯 PDF：{e}"))?;
+
+    let path_string = output_path.to_string_lossy().into_owned();
+    if let Err(error) = app.opener().open_path(path_string.clone(), None::<&str>) {
+        eprintln!("翻譯 PDF 已儲存，但無法自動開啟：{error}");
+    }
+    Ok(path_string)
 }
 
 #[tauri::command]

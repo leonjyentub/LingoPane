@@ -200,6 +200,8 @@ button { color: inherit; }
 .export-option { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid #e0ddd6; border-radius: 8px; cursor: pointer; transition: border-color .15s ease, background .15s ease; }
 .export-option:hover { border-color: #d6aa9b; background: #fdf8f5; }
 .export-option.is-selected { border-color: #b95435; background: #fdf5f2; }
+.export-option.is-unavailable { cursor: not-allowed; opacity: .5; }
+.export-option.is-unavailable:hover { border-color: #e0ddd6; background: transparent; }
 .export-option input[type="radio"] { margin-top: 2px; accent-color: #b95435; }
 .export-option-content { display: flex; flex-direction: column; gap: 2px; }
 .export-option-content strong { color: #36332f; font-size: 12px; font-weight: 620; }
