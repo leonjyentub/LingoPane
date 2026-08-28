@@ -1,6 +1,7 @@
 import type { MessageKey, Translator } from "../i18n";
+import type { RenderMode } from "../lib/renderPlan";
 
-export type RenderMode = "faithful" | "adaptive" | "bilingual";
+export type { RenderMode };
 
 type ExportDialogProps = {
   renderMode: RenderMode;

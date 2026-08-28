@@ -172,12 +172,6 @@ pub async fn list_models(config: ProviderConfig) -> Result<Vec<String>, String> 
     Ok(models)
 }
 
-#[tauri::command]
-pub async fn test_connection(config: ProviderConfig) -> Result<String, String> {
-    let models = list_models(config).await?;
-    Ok(format!("連線成功，共找到 {} 個模型", models.len()))
-}
-
 fn parse_json_content(content: &str) -> Result<Value, String> {
     if let Ok(value) = serde_json::from_str(content.trim()) {
         return Ok(value);
