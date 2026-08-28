@@ -338,6 +338,9 @@ fn merge_batch_analysis(
     Ok(())
 }
 
+// Args mirror the analyze_pdf_with_docling IPC command 1:1; bundling them into
+// a struct is deferred to the PR-3 python_runtime extraction.
+#[allow(clippy::too_many_arguments)]
 fn analyze_pdf_in_batches(
     app: tauri::AppHandle,
     analysis_id: u64,
@@ -474,6 +477,7 @@ pub async fn probe_docling(python_path: Option<String>) -> Result<DoclingStatus,
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // IPC command surface; args come from the frontend individually
 pub async fn analyze_pdf_with_docling(
     app: tauri::AppHandle,
     analysis_id: u64,

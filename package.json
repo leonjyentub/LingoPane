@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
     "test:fixtures": "node --test tools/tests/test_pdf_fixture.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
@@ -21,11 +24,19 @@
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "eslint": "^9.39.5",
+    "eslint-config-prettier": "^9.1.2",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.26",
+    "globals": "^15.15.0",
+    "prettier": "^3.9.6",
     "typescript": "~5.8.3",
+    "typescript-eslint": "^8.68.0",
     "vite": "^7.0.4"
   }
 }

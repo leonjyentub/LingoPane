@@ -306,8 +306,7 @@ fn translate_gemma_prompt(source_code: &str, target_code: &str, text: &str) -> S
     let source_name = translate_gemma_language_name(source_code);
     let target_name = translate_gemma_language_name(target_code);
     let target_hint = if target_code.to_ascii_lowercase().starts_with("zh") {
-        if target_code.to_ascii_lowercase() == "zh-tw"
-            || target_code.to_ascii_lowercase() == "zh_hant"
+        if target_code.eq_ignore_ascii_case("zh-tw") || target_code.eq_ignore_ascii_case("zh_hant")
         {
             "\nIMPORTANT: You MUST output Traditional Chinese characters (繁體中文). Do NOT use Simplified Chinese characters."
         } else {

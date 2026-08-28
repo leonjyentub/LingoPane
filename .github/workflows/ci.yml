@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    # LingoPane targets macOS only (apple-native keyring, libc::kill, Overlay
+    # titlebar), so the Rust build has to run here too.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # --- frontend ---
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build # also produces dist/, which generate_context! needs
+      - run: npm run test:fixtures
+
+      # --- rust ---
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      # --- python workers ---
+      - run: python -m pip install --upgrade pip pymupdf
+      - run: python -m unittest discover -s tools/tests -v
