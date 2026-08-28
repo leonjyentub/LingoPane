@@ -33,6 +33,9 @@ pub struct RenderPage {
 #[serde(rename_all = "camelCase")]
 pub struct RenderBlock {
     pub id: String,
+    // The frontend and pdf_renderer.py both spell this "sourceBBox" (double
+    // capital); serde's camelCase rule would produce "sourceBbox", so pin it.
+    #[serde(rename = "sourceBBox")]
     pub source_bbox: BBox,
     pub source_style: SourceStyle,
     #[serde(default)]
@@ -275,4 +278,76 @@ pub async fn cancel_pdf_render() -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(terminate_active_renderer)
         .await
         .map_err(|e| format!("取消 PDF 渲染失敗：{e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_the_frontend_export_payload() {
+        // Exactly the shape src/App.tsx#exportPdf sends, including the fields the
+        // struct does not model (`type`, `columnId`) which serde must ignore.
+        let payload = serde_json::json!({
+            "pdfBytes": [37, 80, 68, 70],
+            "mode": "faithful",
+            "fontScale": 0.9,
+            "fileName": "doc-translated-faithful.pdf",
+            "translations": { "p1-b1": "翻譯" },
+            "pages": [{
+                "pageNumber": 1,
+                "blocks": [{
+                    "id": "p1-b1",
+                    "sourceBBox": { "x": 10.0, "y": 20.0, "width": 100.0, "height": 40.0 },
+                    "sourceStyle": { "fontSize": 11.0 },
+                    "type": "paragraph",
+                    "columnId": "left",
+                    "maskRects": [{ "x": 10.0, "y": 20.0, "width": 60.0, "height": 12.0 }]
+                }]
+            }]
+        });
+
+        let request: RenderRequest =
+            serde_json::from_value(payload).expect("payload must deserialize");
+        let block = &request.pages[0].blocks[0];
+        assert_eq!(block.source_bbox.width, 100.0);
+        assert_eq!(block.source_style.font_size, 11.0);
+        assert_eq!(block.mask_rects.len(), 1);
+        assert_eq!(request.file_name, "doc-translated-faithful.pdf");
+    }
+
+    #[test]
+    fn mask_rects_default_to_empty_when_absent() {
+        let block: RenderBlock = serde_json::from_value(serde_json::json!({
+            "id": "b",
+            "sourceBBox": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0 },
+            "sourceStyle": { "fontSize": 10.0 }
+        }))
+        .expect("block without maskRects must deserialize");
+        assert!(block.mask_rects.is_empty());
+    }
+
+    #[test]
+    fn reserializes_bbox_as_source_b_box_for_the_python_worker() {
+        let block = RenderBlock {
+            id: "b".into(),
+            source_bbox: BBox {
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+            },
+            source_style: SourceStyle { font_size: 9.0 },
+            mask_rects: vec![],
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("\"sourceBBox\""), "got {json}");
+    }
+
+    #[test]
+    fn sanitize_file_name_forces_pdf_extension_and_strips_separators() {
+        assert_eq!(sanitize_file_name("a/b:c"), "a-b-c.pdf");
+        assert_eq!(sanitize_file_name("report.pdf"), "report.pdf");
+        assert_eq!(sanitize_file_name("  "), "translated.pdf");
+    }
 }
