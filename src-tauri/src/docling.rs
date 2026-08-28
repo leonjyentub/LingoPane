@@ -10,8 +10,9 @@ use std::{
 };
 use tauri::Emitter;
 
+use crate::limits::MAX_DOCLING_PDF_BYTES as MAX_PDF_BYTES;
+
 const WORKER_SOURCE: &str = include_str!("../../tools/docling_worker.py");
-const MAX_PDF_BYTES: usize = 200 * 1024 * 1024;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static ACTIVE_WORKER_PID: AtomicU32 = AtomicU32::new(0);
 const ANALYSIS_BATCH_SIZE: u32 = 5;

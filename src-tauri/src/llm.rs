@@ -11,6 +11,8 @@ use std::{
     time::Duration,
 };
 
+use crate::limits::{MAX_TRANSLATION_BLOCKS_PER_PAGE, MAX_TRANSLATION_CHARS_PER_PAGE};
+
 const KEYCHAIN_SERVICE: &str = "com.leonjye.parallelpdf.llm";
 
 fn active_translations() -> &'static Mutex<HashMap<u64, AbortHandle>> {
@@ -304,7 +306,9 @@ fn translate_gemma_prompt(source_code: &str, target_code: &str, text: &str) -> S
     let source_name = translate_gemma_language_name(source_code);
     let target_name = translate_gemma_language_name(target_code);
     let target_hint = if target_code.to_ascii_lowercase().starts_with("zh") {
-        if target_code.to_ascii_lowercase() == "zh-tw" || target_code.to_ascii_lowercase() == "zh_hant" {
+        if target_code.to_ascii_lowercase() == "zh-tw"
+            || target_code.to_ascii_lowercase() == "zh_hant"
+        {
             "\nIMPORTANT: You MUST output Traditional Chinese characters (繁體中文). Do NOT use Simplified Chinese characters."
         } else {
             "\nIMPORTANT: You MUST output Simplified Chinese characters (简体中文). Do NOT use Traditional Chinese characters."
@@ -416,7 +420,7 @@ async fn translate_blocks_inner(request: TranslationRequest) -> Result<Translati
     if request.blocks.is_empty() {
         return Err("這一頁沒有可翻譯文字".into());
     }
-    if request.blocks.len() > 400 {
+    if request.blocks.len() > MAX_TRANSLATION_BLOCKS_PER_PAGE {
         return Err("單頁文字區塊過多，請縮小翻譯範圍".into());
     }
 
@@ -425,7 +429,7 @@ async fn translate_blocks_inner(request: TranslationRequest) -> Result<Translati
         .iter()
         .map(|block| block.text.chars().count())
         .sum::<usize>();
-    if total_chars > 60_000 {
+    if total_chars > MAX_TRANSLATION_CHARS_PER_PAGE {
         return Err("單頁文字超過目前的 60,000 字元限制".into());
     }
 

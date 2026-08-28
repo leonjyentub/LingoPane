@@ -69,8 +69,14 @@ fn python_candidates() -> Vec<String> {
     if let Ok(home) = std::env::var("HOME") {
         let application_support = PathBuf::from(&home)
             .join("Library/Application Support/com.leonjye.lingopane/docling-runtime");
-        add_python_if_present(&mut candidates, application_support.join("current/bin/python"));
-        add_python_if_present(&mut candidates, application_support.join(".venv/bin/python"));
+        add_python_if_present(
+            &mut candidates,
+            application_support.join("current/bin/python"),
+        );
+        add_python_if_present(
+            &mut candidates,
+            application_support.join(".venv/bin/python"),
+        );
     }
 
     if let Ok(executable) = std::env::current_exe() {
@@ -141,7 +147,9 @@ fn terminate_active_renderer() -> bool {
     unsafe {
         libc::kill(pid as i32, libc::SIGTERM);
     }
-    ACTIVE_RENDERER_PID.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst).ok();
+    ACTIVE_RENDERER_PID
+        .compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .ok();
     true
 }
 
@@ -151,8 +159,8 @@ pub fn render_pdf(request: &RenderRequest) -> Result<Vec<u8>, String> {
     }
 
     let python = find_python()?;
-    let pages_json = serde_json::to_string(&request.pages)
-        .map_err(|e| format!("序列化頁面資料失敗：{e}"))?;
+    let pages_json =
+        serde_json::to_string(&request.pages).map_err(|e| format!("序列化頁面資料失敗：{e}"))?;
     let translations_json = serde_json::to_string(&request.translations)
         .map_err(|e| format!("序列化翻譯資料失敗：{e}"))?;
 
@@ -181,23 +189,20 @@ pub fn render_pdf(request: &RenderRequest) -> Result<Vec<u8>, String> {
     ACTIVE_RENDERER_PID.store(pid, Ordering::SeqCst);
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(&request.pdf_bytes)
-            .map_err(|e| {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = ACTIVE_RENDERER_PID.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst);
-                format!("寫入 PDF 資料失敗：{e}")
-            })?;
+        stdin.write_all(&request.pdf_bytes).map_err(|e| {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ =
+                ACTIVE_RENDERER_PID.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst);
+            format!("寫入 PDF 資料失敗：{e}")
+        })?;
         drop(stdin);
     }
 
-    let output = child
-        .wait_with_output()
-        .map_err(|e| {
-            let _ = ACTIVE_RENDERER_PID.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst);
-            format!("等待 renderer 結束失敗：{e}")
-        })?;
+    let output = child.wait_with_output().map_err(|e| {
+        let _ = ACTIVE_RENDERER_PID.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst);
+        format!("等待 renderer 結束失敗：{e}")
+    })?;
 
     let _ = ACTIVE_RENDERER_PID.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst);
 
