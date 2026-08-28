@@ -1,4 +1,4 @@
-import type { Translator } from "../i18n";
+import type { MessageKey, Translator } from "../i18n";
 
 export type RenderMode = "faithful" | "adaptive" | "bilingual";
 
@@ -11,6 +11,14 @@ type ExportDialogProps = {
   hasTranslations: boolean;
   t: Translator;
 };
+
+// Only `faithful` is wired end-to-end today; `adaptive` and `bilingual` land
+// with the flow planner (see docs/render-execution-plan.md PR-5/PR-6).
+const RENDER_MODES: Array<{ value: RenderMode; available: boolean; labelKey: MessageKey; helpKey: MessageKey }> = [
+  { value: "faithful", available: true, labelKey: "renderFaithful", helpKey: "renderFaithfulHelp" },
+  { value: "adaptive", available: false, labelKey: "renderAdaptive", helpKey: "renderAdaptiveHelp" },
+  { value: "bilingual", available: false, labelKey: "renderBilingual", helpKey: "renderBilingualHelp" },
+];
 
 export function ExportDialog({
   renderMode,
@@ -33,47 +41,25 @@ export function ExportDialog({
         </div>
 
         <div className="export-options">
-          <label className={`export-option ${renderMode === "faithful" ? "is-selected" : ""}`}>
-            <input
-              type="radio"
-              name="renderMode"
-              value="faithful"
-              checked={renderMode === "faithful"}
-              onChange={() => onModeChange("faithful")}
-            />
-            <div className="export-option-content">
-              <strong>{t("renderFaithful")}</strong>
-              <span className="export-option-desc">{t("renderModeHelp").split(".")[0]}.</span>
-            </div>
-          </label>
-
-          <label className={`export-option ${renderMode === "adaptive" ? "is-selected" : ""}`}>
-            <input
-              type="radio"
-              name="renderMode"
-              value="adaptive"
-              checked={renderMode === "adaptive"}
-              onChange={() => onModeChange("adaptive")}
-            />
-            <div className="export-option-content">
-              <strong>{t("renderAdaptive")}</strong>
-              <span className="export-option-desc">{t("renderModeHelp").split(".")[1]?.trim()}.</span>
-            </div>
-          </label>
-
-          <label className={`export-option ${renderMode === "bilingual" ? "is-selected" : ""}`}>
-            <input
-              type="radio"
-              name="renderMode"
-              value="bilingual"
-              checked={renderMode === "bilingual"}
-              onChange={() => onModeChange("bilingual")}
-            />
-            <div className="export-option-content">
-              <strong>{t("renderBilingual")}</strong>
-              <span className="export-option-desc">{t("renderModeHelp").split(".")[2]?.trim()}.</span>
-            </div>
-          </label>
+          {RENDER_MODES.map(({ value, available, labelKey, helpKey }) => (
+            <label
+              key={value}
+              className={`export-option ${renderMode === value ? "is-selected" : ""}${available ? "" : " is-unavailable"}`}
+            >
+              <input
+                type="radio"
+                name="renderMode"
+                value={value}
+                checked={renderMode === value}
+                disabled={!available || exporting}
+                onChange={() => onModeChange(value)}
+              />
+              <div className="export-option-content">
+                <strong>{t(labelKey)}{available ? "" : ` ${t("comingSoon")}`}</strong>
+                <span className="export-option-desc">{t(helpKey)}</span>
+              </div>
+            </label>
+          ))}
         </div>
 
         <div className="modal-actions">

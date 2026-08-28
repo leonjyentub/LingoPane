@@ -40,7 +40,7 @@ const providerDefaults: Record<Provider, string> = {
   "openai-compatible": "https://api.openai.com/v1",
 };
 
-const settingsVersion = 7;
+const settingsVersion = 8;
 
 const initialSettings: ReaderSettings = {
   provider: "omlx",
@@ -52,7 +52,7 @@ const initialSettings: ReaderSettings = {
   translationFontScale: 1.8,
   analysisMode: "fast",
   layoutModel: "egret-large",
-  renderMode: "adaptive",
+  renderMode: "faithful",
   doclingPythonPath: "",
   doclingOcr: false,
   cacheDocumentLimit: 30,
@@ -180,6 +180,11 @@ function loadSettings(): ReaderSettings {
     if (parsed.renderMode !== "faithful" && parsed.renderMode !== "adaptive" && parsed.renderMode !== "bilingual") {
       parsed.renderMode = initialSettings.renderMode;
     }
+    // adaptive / bilingual export is not wired up yet; pin older profiles to the
+    // only mode that produces a valid PDF (see docs/render-execution-plan.md).
+    if (!parsed.settingsVersion || parsed.settingsVersion < 8) {
+      parsed.renderMode = "faithful";
+    }
     if (typeof parsed.doclingPythonPath !== "string") parsed.doclingPythonPath = "";
     if (typeof parsed.doclingOcr !== "boolean") parsed.doclingOcr = initialSettings.doclingOcr;
     if (typeof parsed.cacheDocumentLimit !== "number" || !Number.isFinite(parsed.cacheDocumentLimit)) {
@@ -227,7 +232,6 @@ function App() {
   const [recentDocuments, setRecentDocuments] = useState<RecentDocument[]>([]);
   const [exportingPdf, setExportingPdf] = useState(false);
   const [showExportDialog, setShowExportDialog] = useState(false);
-  const [selectedRenderMode, setSelectedRenderMode] = useState<RenderMode>("adaptive");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const loadingTaskRef = useRef<PDFDocumentLoadingTask | null>(null);
   const pdfBytesRef = useRef<Uint8Array | null>(null);
@@ -1106,7 +1110,17 @@ function App() {
     setShowExportDialog(false);
     try {
       const allTranslations: Record<string, string> = {};
-      const renderPages: Array<{ pageNumber: number; blocks: Array<{ id: string; sourceBBox: { x: number; y: number; width: number; height: number }; sourceStyle: { fontSize: number }; type: string; columnId: string }> }> = [];
+      const renderPages: Array<{
+        pageNumber: number;
+        blocks: Array<{
+          id: string;
+          sourceBBox: { x: number; y: number; width: number; height: number };
+          sourceStyle: { fontSize: number };
+          type: string;
+          columnId: string;
+          maskRects: Array<{ x: number; y: number; width: number; height: number }>;
+        }>;
+      }> = [];
 
       for (let pageNum = 1; pageNum <= document.numPages; pageNum++) {
         const layout = enhancedLayouts[pageNum];
@@ -1117,15 +1131,31 @@ function App() {
           .filter((b) => b.translatable && b.kind !== "formula" && b.kind !== "artifact")
           .map((b) => {
             if (pageTranslations) {
-              const translated = pageTranslations.find((t) => t.id === b.id);
+              const translated = pageTranslations.find((entry) => entry.id === b.id);
               if (translated) allTranslations[b.id] = translated.text;
             }
+            // Redact the tight per-glyph rects that fall inside this block, not
+            // the loose merged bbox — the merged box spans gutters and table
+            // rules that must survive into the exported PDF. Mirrors the
+            // on-screen source-text-mask (TranslationPage.tsx).
+            const blockRight = b.left + b.width;
+            const blockBottom = b.top + b.height;
+            const maskRects = layout.textRects
+              .filter((rect) => {
+                const overlapWidth = Math.min(rect.left + rect.width, blockRight) - Math.max(rect.left, b.left);
+                const overlapHeight = Math.min(rect.top + rect.height, blockBottom) - Math.max(rect.top, b.top);
+                return overlapWidth > 0
+                  && overlapHeight > 0
+                  && overlapWidth * overlapHeight > rect.width * rect.height * 0.3;
+              })
+              .map((rect) => ({ x: rect.left, y: rect.top, width: rect.width, height: rect.height }));
             return {
               id: b.id,
               sourceBBox: { x: b.left, y: b.top, width: b.width, height: b.height },
               sourceStyle: { fontSize: b.fontSize },
               type: b.kind === "heading" ? "heading" : b.kind === "caption" ? "caption" : b.kind === "table" ? "table" : "paragraph",
               columnId: b.left < (layout.width / 2) ? "left" : "right",
+              maskRects,
             };
           });
 
@@ -1137,23 +1167,18 @@ function App() {
         return;
       }
 
-      const result = await invoke<number[]>("render_translated_pdf", {
+      const savedPath = await invoke<string>("render_translated_pdf", {
         request: {
           pdfBytes: Array.from(pdfBytesRef.current),
           pages: renderPages,
           translations: allTranslations,
           mode,
           fontScale: settings.translationFontScale * 0.5,
+          fileName: fileName.replace(/\.pdf$/i, "") + `-translated-${mode}.pdf`,
         },
       });
 
-      const blob = new Blob([new Uint8Array(result)], { type: "application/pdf" });
-      const url = URL.createObjectURL(blob);
-      const link = window.document.createElement("a");
-      link.href = url;
-      link.download = fileName.replace(/\.pdf$/i, "") + `-translated-${mode}.pdf`;
-      link.click();
-      URL.revokeObjectURL(url);
+      setCacheNotice(t("exportSaved", { path: savedPath }));
     } catch (cause) {
       setError(errorMessage(cause, t("exportFailed")));
     } finally {
@@ -1193,6 +1218,12 @@ function App() {
   };
 
   const cacheResolvedLayout = useCallback((pageNumber: number, layout: PdfPageLayout) => {
+    // Keep the in-memory layout map populated so consumers that read it (PDF
+    // export) work on the very first open, before any SQLite cache exists.
+    // Never overwrite an existing entry: a Docling batch result for the same
+    // page must win over this PDF.js fallback.
+    setEnhancedLayouts((current) => (current[pageNumber] ? current : { ...current, [pageNumber]: layout }));
+
     const documentId = documentCacheIdRef.current;
     if (!documentId) return;
     void invoke("save_cached_layout", {
@@ -1569,8 +1600,8 @@ function App() {
               <label>{t("renderMode")}
                 <select value={settings.renderMode} onChange={(event) => setSettings({ ...settings, renderMode: event.target.value as RenderMode })}>
                   <option value="faithful">{t("renderFaithful")}</option>
-                  <option value="adaptive">{t("renderAdaptive")}</option>
-                  <option value="bilingual">{t("renderBilingual")}</option>
+                  <option value="adaptive" disabled>{t("renderAdaptive")} {t("comingSoon")}</option>
+                  <option value="bilingual" disabled>{t("renderBilingual")} {t("comingSoon")}</option>
                 </select>
                 <small className="field-help">{t("renderModeHelp")}</small>
               </label>
@@ -1587,9 +1618,9 @@ function App() {
       )}
       {showExportDialog && (
         <ExportDialog
-          renderMode={selectedRenderMode}
-          onModeChange={setSelectedRenderMode}
-          onExport={() => exportPdf(selectedRenderMode)}
+          renderMode={settings.renderMode}
+          onModeChange={(nextMode) => setSettings((current) => ({ ...current, renderMode: nextMode }))}
+          onExport={() => exportPdf(settings.renderMode)}
           onCancel={() => setShowExportDialog(false)}
           exporting={exportingPdf}
           hasTranslations={Object.keys(translations).length > 0}

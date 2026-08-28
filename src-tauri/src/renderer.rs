@@ -5,9 +5,10 @@ use std::{
     process::{Command, Stdio},
     sync::atomic::{AtomicU32, Ordering},
 };
+use tauri::Manager;
+use tauri_plugin_opener::OpenerExt;
 
 const RENDERER_SOURCE: &str = include_str!("../../tools/pdf_renderer.py");
-const BABELDOC_SOURCE: &str = include_str!("../../tools/babeldoc_worker.py");
 static ACTIVE_RENDERER_PID: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -18,6 +19,7 @@ pub struct RenderRequest {
     pub translations: std::collections::HashMap<String, String>,
     pub mode: String,
     pub font_scale: f64,
+    pub file_name: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -31,8 +33,13 @@ pub struct RenderPage {
 #[serde(rename_all = "camelCase")]
 pub struct RenderBlock {
     pub id: String,
+    // The frontend and pdf_renderer.py both spell this "sourceBBox" (double
+    // capital); serde's camelCase rule would produce "sourceBbox", so pin it.
+    #[serde(rename = "sourceBBox")]
     pub source_bbox: BBox,
     pub source_style: SourceStyle,
+    #[serde(default)]
+    pub mask_rects: Vec<BBox>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -151,14 +158,9 @@ pub fn render_pdf(request: &RenderRequest) -> Result<Vec<u8>, String> {
 
     let _ = terminate_active_renderer();
 
-    let worker_source = match request.mode.as_str() {
-        "adaptive" => BABELDOC_SOURCE,
-        _ => RENDERER_SOURCE,
-    };
-
     let mut child = Command::new(&python)
         .arg("-c")
-        .arg(worker_source)
+        .arg(RENDERER_SOURCE)
         .args([
             "--mode",
             &request.mode,
@@ -207,11 +209,68 @@ pub fn render_pdf(request: &RenderRequest) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
+fn sanitize_file_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | ':' | '\0' => '-',
+            other => other,
+        })
+        .collect();
+    let cleaned = cleaned.trim().trim_start_matches('.').to_string();
+    if cleaned.is_empty() {
+        "translated.pdf".to_string()
+    } else if cleaned.to_lowercase().ends_with(".pdf") {
+        cleaned
+    } else {
+        format!("{cleaned}.pdf")
+    }
+}
+
+fn unique_path(path: PathBuf) -> PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let parent = path.parent().map(PathBuf::from).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("translated");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("pdf");
+    for index in 2..1000 {
+        let candidate = parent.join(format!("{stem} ({index}).{extension}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    path
+}
+
 #[tauri::command]
-pub async fn render_translated_pdf(request: RenderRequest) -> Result<Vec<u8>, String> {
-    tauri::async_runtime::spawn_blocking(move || render_pdf(&request))
+pub async fn render_translated_pdf(
+    app: tauri::AppHandle,
+    request: RenderRequest,
+) -> Result<String, String> {
+    let file_name = sanitize_file_name(&request.file_name);
+    let bytes = tauri::async_runtime::spawn_blocking(move || render_pdf(&request))
         .await
-        .map_err(|e| format!("PDF 渲染工作執行失敗：{e}"))?
+        .map_err(|e| format!("PDF 渲染工作執行失敗：{e}"))??;
+
+    let download_dir = app
+        .path()
+        .download_dir()
+        .map_err(|e| format!("無法取得下載目錄：{e}"))?;
+    let output_path = unique_path(download_dir.join(&file_name));
+    std::fs::write(&output_path, &bytes).map_err(|e| format!("無法寫入翻譯 PDF：{e}"))?;
+
+    let path_string = output_path.to_string_lossy().into_owned();
+    if let Err(error) = app.opener().open_path(path_string.clone(), None::<&str>) {
+        eprintln!("翻譯 PDF 已儲存，但無法自動開啟：{error}");
+    }
+    Ok(path_string)
 }
 
 #[tauri::command]
@@ -219,4 +278,76 @@ pub async fn cancel_pdf_render() -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(terminate_active_renderer)
         .await
         .map_err(|e| format!("取消 PDF 渲染失敗：{e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_the_frontend_export_payload() {
+        // Exactly the shape src/App.tsx#exportPdf sends, including the fields the
+        // struct does not model (`type`, `columnId`) which serde must ignore.
+        let payload = serde_json::json!({
+            "pdfBytes": [37, 80, 68, 70],
+            "mode": "faithful",
+            "fontScale": 0.9,
+            "fileName": "doc-translated-faithful.pdf",
+            "translations": { "p1-b1": "翻譯" },
+            "pages": [{
+                "pageNumber": 1,
+                "blocks": [{
+                    "id": "p1-b1",
+                    "sourceBBox": { "x": 10.0, "y": 20.0, "width": 100.0, "height": 40.0 },
+                    "sourceStyle": { "fontSize": 11.0 },
+                    "type": "paragraph",
+                    "columnId": "left",
+                    "maskRects": [{ "x": 10.0, "y": 20.0, "width": 60.0, "height": 12.0 }]
+                }]
+            }]
+        });
+
+        let request: RenderRequest =
+            serde_json::from_value(payload).expect("payload must deserialize");
+        let block = &request.pages[0].blocks[0];
+        assert_eq!(block.source_bbox.width, 100.0);
+        assert_eq!(block.source_style.font_size, 11.0);
+        assert_eq!(block.mask_rects.len(), 1);
+        assert_eq!(request.file_name, "doc-translated-faithful.pdf");
+    }
+
+    #[test]
+    fn mask_rects_default_to_empty_when_absent() {
+        let block: RenderBlock = serde_json::from_value(serde_json::json!({
+            "id": "b",
+            "sourceBBox": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0 },
+            "sourceStyle": { "fontSize": 10.0 }
+        }))
+        .expect("block without maskRects must deserialize");
+        assert!(block.mask_rects.is_empty());
+    }
+
+    #[test]
+    fn reserializes_bbox_as_source_b_box_for_the_python_worker() {
+        let block = RenderBlock {
+            id: "b".into(),
+            source_bbox: BBox {
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+            },
+            source_style: SourceStyle { font_size: 9.0 },
+            mask_rects: vec![],
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("\"sourceBBox\""), "got {json}");
+    }
+
+    #[test]
+    fn sanitize_file_name_forces_pdf_extension_and_strips_separators() {
+        assert_eq!(sanitize_file_name("a/b:c"), "a-b-c.pdf");
+        assert_eq!(sanitize_file_name("report.pdf"), "report.pdf");
+        assert_eq!(sanitize_file_name("  "), "translated.pdf");
+    }
 }
