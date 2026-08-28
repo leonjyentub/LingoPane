@@ -1564,8 +1564,8 @@ function App() {
               <label>{t("renderMode")}
                 <select value={settings.renderMode} onChange={(event) => setSettings({ ...settings, renderMode: event.target.value as RenderMode })}>
                   <option value="faithful">{t("renderFaithful")}</option>
+                  <option value="bilingual">{t("renderBilingual")}</option>
                   <option value="adaptive" disabled>{t("renderAdaptive")} {t("comingSoon")}</option>
-                  <option value="bilingual" disabled>{t("renderBilingual")} {t("comingSoon")}</option>
                 </select>
                 <small className="field-help">{t("renderModeHelp")}</small>
               </label>

@@ -13,12 +13,11 @@ type ExportDialogProps = {
   t: Translator;
 };
 
-// Only `faithful` is wired end-to-end today; `adaptive` and `bilingual` land
-// with the flow planner (see docs/render-execution-plan.md PR-5/PR-6).
+// `adaptive` lands with the obstacle-aware planner in PR-6.
 const RENDER_MODES: Array<{ value: RenderMode; available: boolean; labelKey: MessageKey; helpKey: MessageKey }> = [
   { value: "faithful", available: true, labelKey: "renderFaithful", helpKey: "renderFaithfulHelp" },
+  { value: "bilingual", available: true, labelKey: "renderBilingual", helpKey: "renderBilingualHelp" },
   { value: "adaptive", available: false, labelKey: "renderAdaptive", helpKey: "renderAdaptiveHelp" },
-  { value: "bilingual", available: false, labelKey: "renderBilingual", helpKey: "renderBilingualHelp" },
 ];
 
 export function ExportDialog({

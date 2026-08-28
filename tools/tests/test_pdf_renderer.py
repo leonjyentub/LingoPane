@@ -23,7 +23,12 @@ _MODULE_PATH = Path(__file__).resolve().parents[1] / "pdf_renderer.py"
 _spec = importlib.util.spec_from_file_location("pdf_renderer", _MODULE_PATH)
 pdf_renderer = importlib.util.module_from_spec(_spec)
 assert _spec and _spec.loader
+# @dataclass needs the module registered before exec so it can resolve
+# `cls.__module__` while processing fields.
+sys.modules["pdf_renderer"] = pdf_renderer
 _spec.loader.exec_module(pdf_renderer)
+
+_FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def _one_page_pdf_with_rule() -> bytes:
@@ -59,10 +64,9 @@ def _block(bid, x, y, w, h, text, *, font_size=11, masks=None):
 
 
 class PdfRendererTests(unittest.TestCase):
-    def test_non_faithful_modes_fail_with_message(self) -> None:
-        for mode in ("adaptive", "bilingual"):
-            with self.assertRaises(NotImplementedError):
-                pdf_renderer.render(b"", _plan([], mode=mode))
+    def test_adaptive_still_not_implemented(self) -> None:
+        with self.assertRaises(NotImplementedError):
+            pdf_renderer.render(b"", _plan([], mode="adaptive"))
 
     def test_unsupported_plan_version_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
@@ -117,6 +121,91 @@ class PdfRendererTests(unittest.TestCase):
         }
         with self.assertRaises(ValueError):
             pdf_renderer.render_faithful(_one_page_pdf_with_rule(), _plan([page]))
+
+
+class FlowPlannerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.font = pdf_renderer._cjk_font()
+
+    def test_wrap_ascii_breaks_only_at_spaces(self) -> None:
+        lines = pdf_renderer.wrap("the quick brown fox jumps over", self.font, 10, 70)
+        self.assertGreater(len(lines), 1)
+        for line in lines:
+            self.assertNotIn(" ", (line[:1] + line[-1:]))  # no leading/trailing space
+            self.assertLessEqual(self.font.text_length(line, 10), 70 + 1e-6)
+
+    def test_wrap_cjk_breaks_anywhere_but_not_before_forbidden_punct(self) -> None:
+        lines = pdf_renderer.wrap("結尾標點測試，句號。逗號，不能在行首", self.font, 10, 52)
+        self.assertGreater(len(lines), 1)
+        for line in lines[1:]:
+            self.assertNotIn(line[0], pdf_renderer._LEADING_FORBIDDEN)
+
+    def test_wrap_keeps_ascii_words_whole_in_mixed_text(self) -> None:
+        lines = pdf_renderer.wrap("這是 mixed 中英 content 測試", self.font, 10, 60)
+        self.assertIn("mixed", "".join(lines))
+        for word in ("mixed", "content"):
+            self.assertTrue(any(word in line for line in lines))
+
+    def test_detect_columns_two_column_fixture(self) -> None:
+        doc = pymupdf.open(_FIXTURES / "docling-two-column-table.pdf")
+        page = doc[0]
+        blocks = []
+        for block in page.get_text("dict")["blocks"]:
+            if block.get("type", 0) != 0:
+                continue
+            for line in block["lines"]:
+                xs = [s["bbox"][0] for s in line["spans"]]
+                xe = [s["bbox"][2] for s in line["spans"]]
+                if xs:
+                    blocks.append({"kind": "text", "bbox": {"x": min(xs), "y": line["bbox"][1],
+                                                            "width": max(xe) - min(xs), "height": 10}})
+        self.assertEqual(len(pdf_renderer.detect_columns(blocks, page.rect.width)), 2)
+
+    def test_detect_columns_falls_back_to_single(self) -> None:
+        blocks = [{"kind": "text", "bbox": {"x": 40, "y": y, "width": 300, "height": 10}} for y in range(0, 300, 12)]
+        self.assertEqual(pdf_renderer.detect_columns(blocks, 400), [(0.0, 400)])
+
+    def test_policy_and_mode_tables_cover_every_kind_and_mode(self) -> None:
+        for kind in ("text", "heading", "caption", "table", "formula", "artifact"):
+            self.assertIn(kind, pdf_renderer.POLICY)
+        for mode in ("faithful", "adaptive", "bilingual"):
+            self.assertIn(mode, pdf_renderer.MODE)
+        self.assertTrue(pdf_renderer.POLICY["caption"].pin)  # captions stay with their figure
+        self.assertFalse(pdf_renderer.MODE["bilingual"].redact)
+
+    def test_bilingual_interleaves_original_and_translation_pages(self) -> None:
+        doc = pymupdf.open(_FIXTURES / "docling-two-column-table.pdf")
+        pages = [{
+            "pageNumber": n + 1,
+            "width": doc[n].rect.width,
+            "height": doc[n].rect.height,
+            "blocks": [_block(f"p{n}-b{i}", 60, 90 + i * 40, 240, 30,
+                              f"這是第 {n + 1} 頁第 {i} 段的翻譯內容，字數足夠觀察換行。")
+                       for i in range(4)],
+        } for n in range(len(doc))]
+        rendered = pdf_renderer.render_bilingual(doc.tobytes(), _plan(pages, mode="bilingual"))
+        out = pymupdf.open(stream=rendered, filetype="pdf")
+        self.assertGreaterEqual(len(out), 2 * len(doc))
+        self.assertIn("這是第 1 頁第 0 段", out[1].get_text())  # page 2 is page 1's translation
+
+    def test_bilingual_caps_continuation_pages(self) -> None:
+        doc = pymupdf.open(_FIXTURES / "docling-two-column-table.pdf")
+        pages = [{
+            "pageNumber": 1,
+            "width": doc[0].rect.width,
+            "height": doc[0].rect.height,
+            "blocks": [_block("huge", 50, 50, 400, 40, "超長內容需要很多頁。" * 3000)],
+        }]
+        stderr = io.StringIO()
+        real, sys.stderr = sys.stderr, stderr
+        try:
+            rendered = pdf_renderer.render_bilingual(doc.tobytes(), _plan(pages, mode="bilingual"))
+        finally:
+            sys.stderr = real
+        out = pymupdf.open(stream=rendered, filetype="pdf")
+        # 2 originals + 1 translation + at most MAX_CONTINUATION_PAGES
+        self.assertLessEqual(len(out), len(doc) + 1 + pdf_renderer.MAX_CONTINUATION_PAGES)
+        self.assertIn("續頁上限", stderr.getvalue())
 
 
 if __name__ == "__main__":
