@@ -63,12 +63,14 @@ const initialSettings: ReaderSettings = {
 type TranslationResult = {
   blocks: TranslatedBlock[];
   model: string;
+  missingIds: string[];
 };
 
 type PageTranslationState = {
   status: TranslationStatus;
   error?: string;
   restoredFromCache?: boolean;
+  missingIds?: string[];
 };
 
 type BatchTranslationState = {
@@ -140,9 +142,14 @@ function analysisCacheKey(settings: Pick<ReaderSettings, "analysisMode" | "docli
     : "layout-v5:pdfjs";
 }
 
+// Bump when the translation prompt or request strategy in src-tauri/src/llm.rs
+// changes, so cached translations from the old prompt stop matching.
+const TRANSLATION_PROMPT_VERSION = 2;
+
 function translationCacheKey(settings: ReaderSettings) {
   return JSON.stringify({
     version: 1,
+    promptVersion: TRANSLATION_PROMPT_VERSION,
     provider: settings.provider,
     baseUrl: settings.baseUrl.trim().replace(/\/+$/, ""),
     model: settings.model.trim(),
@@ -1023,8 +1030,13 @@ function App() {
         },
       });
       if (translationJobsRef.current[page] !== job) return "cancelled";
-      setTranslations((current) => ({ ...current, [page]: result.blocks }));
-      setTranslationStates((current) => ({ ...current, [page]: { status: "success" } }));
+      const translatedBlocks = result.blocks.filter((block) => block.text.trim().length > 0);
+      const missingIds = result.missingIds ?? [];
+      setTranslations((current) => ({ ...current, [page]: translatedBlocks }));
+      setTranslationStates((current) => ({
+        ...current,
+        [page]: missingIds.length > 0 ? { status: "partial", missingIds } : { status: "success" },
+      }));
       if (cacheDocumentId) {
         void invoke("save_cached_translation", {
           request: {
@@ -1032,7 +1044,7 @@ function App() {
             analysisKey: cacheAnalysisKey,
             translationKey: translationCacheKey(settings),
             pageNumber: page,
-            blocks: result.blocks,
+            blocks: translatedBlocks,
           },
         }).catch(console.error);
       }
@@ -1146,6 +1158,7 @@ function App() {
       || translations[page]
       || state === "loading"
       || state === "success"
+      || state === "partial"
       || state === "error") return;
 
     const anotherPageIsLoading = Object.entries(translationStates).some(([pageNumber, pageState]) =>
