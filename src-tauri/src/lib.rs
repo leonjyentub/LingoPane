@@ -3,6 +3,7 @@ mod docling;
 mod files;
 mod limits;
 mod llm;
+mod python_runtime;
 mod renderer;
 mod window_controls;
 
@@ -26,11 +27,9 @@ pub fn run() {
             files::take_opened_pdf_paths,
             llm::save_api_key,
             llm::list_models,
-            llm::test_connection,
             llm::cancel_translation,
             llm::translate_blocks,
             renderer::render_translated_pdf,
-            renderer::cancel_pdf_render,
             window_controls::start_window_drag,
             window_controls::toggle_window_maximize
         ])

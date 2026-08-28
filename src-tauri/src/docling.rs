@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
     env, fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -11,6 +10,7 @@ use std::{
 use tauri::Emitter;
 
 use crate::limits::MAX_DOCLING_PDF_BYTES as MAX_PDF_BYTES;
+use crate::python_runtime::python_candidates;
 
 const WORKER_SOURCE: &str = include_str!("../../tools/docling_worker.py");
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -133,72 +133,6 @@ impl TemporaryPdf {
 impl Drop for TemporaryPdf {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
-    }
-}
-
-fn python_candidates(requested: Option<&str>) -> Vec<String> {
-    if let Some(requested) = requested.map(str::trim).filter(|path| !path.is_empty()) {
-        return vec![requested.to_string()];
-    }
-
-    let mut candidates = Vec::new();
-    if let Ok(configured) = env::var("LINGOPANE_DOCLING_PYTHON") {
-        if !configured.trim().is_empty() {
-            candidates.push(configured);
-        }
-    }
-
-    if let Ok(home) = env::var("HOME") {
-        let application_support = PathBuf::from(home)
-            .join("Library/Application Support/com.leonjye.lingopane/docling-runtime");
-        add_python_if_present(
-            &mut candidates,
-            application_support.join("current/bin/python"),
-        );
-        add_python_if_present(
-            &mut candidates,
-            application_support.join(".venv/bin/python"),
-        );
-    }
-    if let Ok(executable) = env::current_exe() {
-        if let Some(macos_directory) = executable.parent() {
-            add_python_if_present(
-                &mut candidates,
-                macos_directory.join("../Resources/docling-runtime/bin/python"),
-            );
-            add_python_if_present(
-                &mut candidates,
-                macos_directory.join("../Resources/docling-runtime/.venv/bin/python"),
-            );
-        }
-    }
-    add_python_if_present(
-        &mut candidates,
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tools/docling-runtime/.venv/bin/python"),
-    );
-    if let Ok(current_directory) = env::current_dir() {
-        add_python_if_present(
-            &mut candidates,
-            current_directory.join("tools/docling-runtime/.venv/bin/python"),
-        );
-    }
-    candidates.extend([
-        "python3".to_string(),
-        "/opt/homebrew/bin/python3".to_string(),
-        "/usr/local/bin/python3".to_string(),
-        "python".to_string(),
-    ]);
-
-    let mut seen = HashSet::new();
-    candidates
-        .into_iter()
-        .filter(|candidate| seen.insert(candidate.clone()))
-        .collect()
-}
-
-fn add_python_if_present(candidates: &mut Vec<String>, path: PathBuf) {
-    if path.is_file() {
-        candidates.push(path.to_string_lossy().into_owned());
     }
 }
 
@@ -536,20 +470,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn explicit_python_path_disables_fallback_candidates() {
-        assert_eq!(
-            python_candidates(Some(" /tmp/venv/bin/python ")),
-            vec!["/tmp/venv/bin/python"]
-        );
-    }
-
-    #[test]
-    fn only_adds_existing_runtime_paths() {
-        let mut candidates = Vec::new();
-        add_python_if_present(&mut candidates, PathBuf::from("/path/that/does/not/exist"));
-        assert!(candidates.is_empty());
-    }
+    // Python discovery moved to python_runtime.rs (covered by its own tests).
 
     #[test]
     fn parses_worker_json_after_log_lines() {

@@ -8,135 +8,64 @@ use std::{
 use tauri::Manager;
 use tauri_plugin_opener::OpenerExt;
 
+use crate::python_runtime::python_with_pymupdf;
+
 const RENDERER_SOURCE: &str = include_str!("../../tools/pdf_renderer.py");
 static ACTIVE_RENDERER_PID: AtomicU32 = AtomicU32::new(0);
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderRequest {
     pub pdf_bytes: Vec<u8>,
-    pub pages: Vec<RenderPage>,
-    pub translations: std::collections::HashMap<String, String>,
-    pub mode: String,
-    pub font_scale: f64,
+    pub plan: RenderPlan,
     pub file_name: String,
 }
 
+/// Versioned wire contract — mirror of src/lib/renderPlan.ts. `pdf_renderer.py`
+/// checks `version` before touching anything else.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RenderPage {
+pub struct RenderPlan {
+    pub version: u32,
+    pub mode: String,
+    pub target_language: String,
+    pub font_scale: f64,
+    pub min_font_scale: f64,
+    pub pages: Vec<RenderPagePlan>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderPagePlan {
     pub page_number: u32,
-    pub blocks: Vec<RenderBlock>,
+    pub width: f64,
+    pub height: f64,
+    pub blocks: Vec<RenderPlanBlock>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RenderBlock {
+pub struct RenderPlanBlock {
     pub id: String,
-    // The frontend and pdf_renderer.py both spell this "sourceBBox" (double
-    // capital); serde's camelCase rule would produce "sourceBbox", so pin it.
-    #[serde(rename = "sourceBBox")]
-    pub source_bbox: BBox,
-    pub source_style: SourceStyle,
+    pub kind: String,
+    pub bbox: RenderRect,
+    pub font_size: f64,
     #[serde(default)]
-    pub mask_rects: Vec<BBox>,
+    pub text_align: Option<String>,
+    #[serde(default)]
+    pub emphasis: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub mask_rects: Vec<RenderRect>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BBox {
+pub struct RenderRect {
     pub x: f64,
     pub y: f64,
     pub width: f64,
     pub height: f64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceStyle {
-    pub font_size: f64,
-}
-
-fn python_candidates() -> Vec<String> {
-    let mut candidates = Vec::new();
-
-    if let Ok(configured) = std::env::var("LINGOPANE_DOCLING_PYTHON") {
-        if !configured.trim().is_empty() {
-            candidates.push(configured);
-        }
-    }
-
-    if let Ok(home) = std::env::var("HOME") {
-        let application_support = PathBuf::from(&home)
-            .join("Library/Application Support/com.leonjye.lingopane/docling-runtime");
-        add_python_if_present(
-            &mut candidates,
-            application_support.join("current/bin/python"),
-        );
-        add_python_if_present(
-            &mut candidates,
-            application_support.join(".venv/bin/python"),
-        );
-    }
-
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(macos_directory) = executable.parent() {
-            add_python_if_present(
-                &mut candidates,
-                macos_directory.join("../Resources/docling-runtime/bin/python"),
-            );
-            add_python_if_present(
-                &mut candidates,
-                macos_directory.join("../Resources/docling-runtime/.venv/bin/python"),
-            );
-        }
-    }
-
-    add_python_if_present(
-        &mut candidates,
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tools/docling-runtime/.venv/bin/python"),
-    );
-
-    if let Ok(current_directory) = std::env::current_dir() {
-        add_python_if_present(
-            &mut candidates,
-            current_directory.join("tools/docling-runtime/.venv/bin/python"),
-        );
-    }
-
-    candidates.extend([
-        "python3".to_string(),
-        "/opt/homebrew/bin/python3".to_string(),
-        "/usr/local/bin/python3".to_string(),
-        "python".to_string(),
-    ]);
-
-    let mut seen = std::collections::HashSet::new();
-    candidates
-        .into_iter()
-        .filter(|candidate| seen.insert(candidate.clone()))
-        .collect()
-}
-
-fn add_python_if_present(candidates: &mut Vec<String>, path: PathBuf) {
-    if path.is_file() {
-        candidates.push(path.to_string_lossy().into_owned());
-    }
-}
-
-fn find_python() -> Result<String, String> {
-    for candidate in python_candidates() {
-        let output = Command::new(&candidate)
-            .arg("-c")
-            .arg("import fitz; print(fitz.__version__)")
-            .output();
-        if let Ok(out) = output {
-            if out.status.success() {
-                return Ok(candidate);
-            }
-        }
-    }
-    Err("找不到安裝了 PyMuPDF 的 Python".into())
 }
 
 fn terminate_active_renderer() -> bool {
@@ -158,27 +87,16 @@ pub fn render_pdf(request: &RenderRequest) -> Result<Vec<u8>, String> {
         return Err("PDF 內容是空的".into());
     }
 
-    let python = find_python()?;
-    let pages_json =
-        serde_json::to_string(&request.pages).map_err(|e| format!("序列化頁面資料失敗：{e}"))?;
-    let translations_json = serde_json::to_string(&request.translations)
-        .map_err(|e| format!("序列化翻譯資料失敗：{e}"))?;
+    let python = python_with_pymupdf()?;
+    let plan_json = serde_json::to_string(&request.plan)
+        .map_err(|e| format!("序列化 render plan 失敗：{e}"))?;
 
     let _ = terminate_active_renderer();
 
     let mut child = Command::new(&python)
         .arg("-c")
         .arg(RENDERER_SOURCE)
-        .args([
-            "--mode",
-            &request.mode,
-            "--pages-json",
-            &pages_json,
-            "--translations-json",
-            &translations_json,
-            "--font-scale",
-            &request.font_scale.to_string(),
-        ])
+        .args(["--plan-json", &plan_json])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -278,75 +196,75 @@ pub async fn render_translated_pdf(
     Ok(path_string)
 }
 
-#[tauri::command]
-pub async fn cancel_pdf_render() -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(terminate_active_renderer)
-        .await
-        .map_err(|e| format!("取消 PDF 渲染失敗：{e}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn deserializes_the_frontend_export_payload() {
-        // Exactly the shape src/App.tsx#exportPdf sends, including the fields the
-        // struct does not model (`type`, `columnId`) which serde must ignore.
-        let payload = serde_json::json!({
+    fn frontend_payload() -> serde_json::Value {
+        // Exactly the shape src/App.tsx#exportPdf now sends.
+        serde_json::json!({
             "pdfBytes": [37, 80, 68, 70],
-            "mode": "faithful",
-            "fontScale": 0.9,
             "fileName": "doc-translated-faithful.pdf",
-            "translations": { "p1-b1": "翻譯" },
-            "pages": [{
-                "pageNumber": 1,
-                "blocks": [{
-                    "id": "p1-b1",
-                    "sourceBBox": { "x": 10.0, "y": 20.0, "width": 100.0, "height": 40.0 },
-                    "sourceStyle": { "fontSize": 11.0 },
-                    "type": "paragraph",
-                    "columnId": "left",
-                    "maskRects": [{ "x": 10.0, "y": 20.0, "width": 60.0, "height": 12.0 }]
+            "plan": {
+                "version": 1,
+                "mode": "faithful",
+                "targetLanguage": "zh-TW",
+                "fontScale": 0.9,
+                "minFontScale": 0.85,
+                "pages": [{
+                    "pageNumber": 1,
+                    "width": 612.0,
+                    "height": 792.0,
+                    "blocks": [{
+                        "id": "p1-b1",
+                        "kind": "text",
+                        "bbox": { "x": 10.0, "y": 20.0, "width": 100.0, "height": 40.0 },
+                        "fontSize": 11.0,
+                        "textAlign": "left",
+                        "text": "翻譯後的段落",
+                        "maskRects": [{ "x": 10.0, "y": 20.0, "width": 60.0, "height": 12.0 }]
+                    }]
                 }]
-            }]
-        });
-
-        let request: RenderRequest =
-            serde_json::from_value(payload).expect("payload must deserialize");
-        let block = &request.pages[0].blocks[0];
-        assert_eq!(block.source_bbox.width, 100.0);
-        assert_eq!(block.source_style.font_size, 11.0);
-        assert_eq!(block.mask_rects.len(), 1);
-        assert_eq!(request.file_name, "doc-translated-faithful.pdf");
+            }
+        })
     }
 
     #[test]
-    fn mask_rects_default_to_empty_when_absent() {
-        let block: RenderBlock = serde_json::from_value(serde_json::json!({
+    fn deserializes_the_render_plan_payload() {
+        let request: RenderRequest =
+            serde_json::from_value(frontend_payload()).expect("payload must deserialize");
+        assert_eq!(request.plan.version, 1);
+        assert_eq!(request.plan.mode, "faithful");
+        let block = &request.plan.pages[0].blocks[0];
+        assert_eq!(block.kind, "text");
+        assert_eq!(block.bbox.width, 100.0);
+        assert_eq!(block.font_size, 11.0);
+        assert_eq!(block.text, "翻譯後的段落");
+        assert_eq!(block.mask_rects.len(), 1);
+    }
+
+    #[test]
+    fn optional_block_fields_default() {
+        let block: RenderPlanBlock = serde_json::from_value(serde_json::json!({
             "id": "b",
-            "sourceBBox": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0 },
-            "sourceStyle": { "fontSize": 10.0 }
+            "kind": "heading",
+            "bbox": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0 },
+            "fontSize": 14.0,
+            "text": "標題"
         }))
-        .expect("block without maskRects must deserialize");
+        .expect("block with only required fields must deserialize");
+        assert!(block.text_align.is_none());
+        assert!(block.emphasis.is_none());
         assert!(block.mask_rects.is_empty());
     }
 
     #[test]
-    fn reserializes_bbox_as_source_b_box_for_the_python_worker() {
-        let block = RenderBlock {
-            id: "b".into(),
-            source_bbox: BBox {
-                x: 1.0,
-                y: 2.0,
-                width: 3.0,
-                height: 4.0,
-            },
-            source_style: SourceStyle { font_size: 9.0 },
-            mask_rects: vec![],
-        };
-        let json = serde_json::to_string(&block).unwrap();
-        assert!(json.contains("\"sourceBBox\""), "got {json}");
+    fn reserializes_plan_in_camel_case_for_the_python_worker() {
+        let request: RenderRequest = serde_json::from_value(frontend_payload()).unwrap();
+        let json = serde_json::to_string(&request.plan).unwrap();
+        assert!(json.contains("\"minFontScale\""), "got {json}");
+        assert!(json.contains("\"pageNumber\""), "got {json}");
+        assert!(json.contains("\"fontSize\""), "got {json}");
     }
 
     #[test]

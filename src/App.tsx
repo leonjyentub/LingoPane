@@ -6,11 +6,12 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { PdfPage } from "./components/PdfPage";
 import { OutlineSidebar, type PdfOutlineItem } from "./components/OutlineSidebar";
-import { ExportDialog, type RenderMode } from "./components/ExportDialog";
+import { ExportDialog } from "./components/ExportDialog";
 import { TranslationPage, type TranslatedBlock, type TranslationStatus } from "./components/TranslationPage";
 import { buildDoclingLayouts, type AnalysisMode, type DoclingStatus, type DocumentAnalysis } from "./lib/docling";
 import { getPageLayout } from "./lib/pdfLayout";
 import type { PdfPageLayout } from "./lib/pdfLayout";
+import { buildRenderPlan, type RenderMode } from "./lib/renderPlan";
 import { createTranslator, resolveInterfaceLanguage, type InterfaceLanguage } from "./i18n";
 import "./App.css";
 
@@ -1109,60 +1110,13 @@ function App() {
     setExportingPdf(true);
     setShowExportDialog(false);
     try {
-      const allTranslations: Record<string, string> = {};
-      const renderPages: Array<{
-        pageNumber: number;
-        blocks: Array<{
-          id: string;
-          sourceBBox: { x: number; y: number; width: number; height: number };
-          sourceStyle: { fontSize: number };
-          type: string;
-          columnId: string;
-          maskRects: Array<{ x: number; y: number; width: number; height: number }>;
-        }>;
-      }> = [];
+      const plan = buildRenderPlan(enhancedLayouts, translations, document.numPages, {
+        mode,
+        targetLanguage: settings.targetLanguage,
+        fontScale: settings.translationFontScale * 0.5,
+      });
 
-      for (let pageNum = 1; pageNum <= document.numPages; pageNum++) {
-        const layout = enhancedLayouts[pageNum];
-        const pageTranslations = translations[pageNum];
-        if (!layout) continue;
-
-        const blocks = layout.blocks
-          .filter((b) => b.translatable && b.kind !== "formula" && b.kind !== "artifact")
-          .map((b) => {
-            if (pageTranslations) {
-              const translated = pageTranslations.find((entry) => entry.id === b.id);
-              if (translated) allTranslations[b.id] = translated.text;
-            }
-            // Redact the tight per-glyph rects that fall inside this block, not
-            // the loose merged bbox — the merged box spans gutters and table
-            // rules that must survive into the exported PDF. Mirrors the
-            // on-screen source-text-mask (TranslationPage.tsx).
-            const blockRight = b.left + b.width;
-            const blockBottom = b.top + b.height;
-            const maskRects = layout.textRects
-              .filter((rect) => {
-                const overlapWidth = Math.min(rect.left + rect.width, blockRight) - Math.max(rect.left, b.left);
-                const overlapHeight = Math.min(rect.top + rect.height, blockBottom) - Math.max(rect.top, b.top);
-                return overlapWidth > 0
-                  && overlapHeight > 0
-                  && overlapWidth * overlapHeight > rect.width * rect.height * 0.3;
-              })
-              .map((rect) => ({ x: rect.left, y: rect.top, width: rect.width, height: rect.height }));
-            return {
-              id: b.id,
-              sourceBBox: { x: b.left, y: b.top, width: b.width, height: b.height },
-              sourceStyle: { fontSize: b.fontSize },
-              type: b.kind === "heading" ? "heading" : b.kind === "caption" ? "caption" : b.kind === "table" ? "table" : "paragraph",
-              columnId: b.left < (layout.width / 2) ? "left" : "right",
-              maskRects,
-            };
-          });
-
-        renderPages.push({ pageNumber: pageNum, blocks });
-      }
-
-      if (Object.keys(allTranslations).length === 0) {
+      if (plan.pages.length === 0) {
         setError(t("noTranslationsToExport"));
         return;
       }
@@ -1170,10 +1124,7 @@ function App() {
       const savedPath = await invoke<string>("render_translated_pdf", {
         request: {
           pdfBytes: Array.from(pdfBytesRef.current),
-          pages: renderPages,
-          translations: allTranslations,
-          mode,
-          fontScale: settings.translationFontScale * 0.5,
+          plan,
           fileName: fileName.replace(/\.pdf$/i, "") + `-translated-${mode}.pdf`,
         },
       });
