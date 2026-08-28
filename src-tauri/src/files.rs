@@ -1,8 +1,7 @@
+use crate::limits::MAX_PDF_BYTES;
 use serde::Serialize;
 use std::{path::PathBuf, sync::Mutex};
 use tauri::{Emitter, Manager};
-
-const MAX_PDF_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,7 +70,7 @@ pub fn read_dropped_pdf(path: String) -> Result<DroppedPdf, String> {
     if metadata.len() == 0 {
         return Err("PDF 檔案是空的".into());
     }
-    if metadata.len() > MAX_PDF_BYTES {
+    if metadata.len() > MAX_PDF_BYTES as u64 {
         return Err("PDF 超過目前的 512 MB 大小限制".into());
     }
 

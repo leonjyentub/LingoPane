@@ -1,6 +1,7 @@
 mod cache;
 mod docling;
 mod files;
+mod limits;
 mod llm;
 mod renderer;
 mod window_controls;

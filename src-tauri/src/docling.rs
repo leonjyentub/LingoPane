@@ -10,8 +10,9 @@ use std::{
 };
 use tauri::Emitter;
 
+use crate::limits::MAX_DOCLING_PDF_BYTES as MAX_PDF_BYTES;
+
 const WORKER_SOURCE: &str = include_str!("../../tools/docling_worker.py");
-const MAX_PDF_BYTES: usize = 200 * 1024 * 1024;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static ACTIVE_WORKER_PID: AtomicU32 = AtomicU32::new(0);
 const ANALYSIS_BATCH_SIZE: u32 = 5;
@@ -337,6 +338,9 @@ fn merge_batch_analysis(
     Ok(())
 }
 
+// Args mirror the analyze_pdf_with_docling IPC command 1:1; bundling them into
+// a struct is deferred to the PR-3 python_runtime extraction.
+#[allow(clippy::too_many_arguments)]
 fn analyze_pdf_in_batches(
     app: tauri::AppHandle,
     analysis_id: u64,
@@ -473,6 +477,7 @@ pub async fn probe_docling(python_path: Option<String>) -> Result<DoclingStatus,
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // IPC command surface; args come from the frontend individually
 pub async fn analyze_pdf_with_docling(
     app: tauri::AppHandle,
     analysis_id: u64,
