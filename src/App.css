@@ -58,6 +58,7 @@ button { color: inherit; }
 .translation-state-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #c8c4bc; }
 .translation-state-dot.is-loading { background: #d29336; box-shadow: 0 0 0 3px rgba(210, 147, 54, .14); }
 .translation-state-dot.is-success { background: #4f9b68; }
+.translation-state-dot.is-partial { background: #d29336; }
 .translation-state-dot.is-error { background: #bb513d; }
 .translation-summary { max-width: 220px; padding: 4px 5px; overflow: hidden; color: #746f67; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .translation-summary strong { color: #555149; font-weight: 650; }
@@ -110,6 +111,7 @@ button { color: inherit; }
 
 .translation-page { overflow: visible; background: #fffefa; }
 .translation-page > canvas { display: block; }
+.partial-translation-badge { position: absolute; left: 8px; top: 7px; z-index: 3; padding: 2px 6px; border-radius: 4px; font-size: 9px; font-weight: 600; color: #8a5a1c; background: rgba(250, 240, 224, .92); border: 1px solid #e6cba6; }
 .translation-mask { position: absolute; inset: 0; overflow: hidden; background: rgba(255, 254, 250, .76); backdrop-filter: blur(1.2px); }
 .layout-skeleton { position: absolute; inset: 0; opacity: .34; }
 .layout-skeleton span { position: absolute; display: block; border-radius: 2px; background: #c9c4ba; }

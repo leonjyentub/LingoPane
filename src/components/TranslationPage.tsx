@@ -1,10 +1,18 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist";
-import { getPageLayout, type PdfPageLayout } from "../lib/pdfLayout";
+import { getPageLayout, type PdfPageLayout, type PdfTextBlock } from "../lib/pdfLayout";
 import type { Translator } from "../i18n";
 
 export type TranslatedBlock = { id: string; text: string };
-export type TranslationStatus = "idle" | "loading" | "success" | "error";
+// "partial": some blocks translated, some the model never returned — the page
+// still renders, untranslated blocks keep their original text.
+export type TranslationStatus = "idle" | "loading" | "success" | "error" | "partial";
+
+function overlaps(rect: PdfPageLayout["textRects"][number], block: PdfTextBlock): boolean {
+  const overlapWidth = Math.min(rect.left + rect.width, block.left + block.width) - Math.max(rect.left, block.left);
+  const overlapHeight = Math.min(rect.top + rect.height, block.top + block.height) - Math.max(rect.top, block.top);
+  return overlapWidth > 0 && overlapHeight > 0 && overlapWidth * overlapHeight > rect.width * rect.height * 0.3;
+}
 
 type TranslationPageProps = {
   document: PDFDocumentProxy;
@@ -162,8 +170,14 @@ export function TranslationPage({ document, pageNumber, scale, layoutOverride, t
     return () => { cancelled = true; renderTask?.cancel(); };
   }, [document, pageNumber, scale, visible]);
 
-  const translatedById = new Map(translations?.map((block) => [block.id, block.text]) ?? []);
-  const translated = status === "success" && translatedById.size > 0;
+  const translatedById = new Map(
+    (translations ?? []).filter((block) => block.text.trim().length > 0).map((block) => [block.id, block.text]),
+  );
+  const translated = (status === "success" || status === "partial") && translatedById.size > 0;
+  const translatedBlocks = layout.blocks.filter((block) => translatedById.has(block.id));
+  // Only white out the glyphs we're actually replacing — an untranslated block
+  // (partial page) keeps its real text instead of vanishing under a mask.
+  const maskedRects = layout.textRects.filter((rect) => translatedBlocks.some((block) => overlaps(rect, block)));
   const bodyFontSamples = layout.blocks
     .filter((block) => block.kind === "text" && block.translatable && block.fontSize > 0)
     .map((block) => ({ fontSize: block.fontSize, weight: Math.max(1, block.width * block.height) }))
@@ -191,8 +205,13 @@ export function TranslationPage({ document, pageNumber, scale, layoutOverride, t
 
       {translated && (
         <div className="translated-layer">
+          {status === "partial" && (
+            <span className="partial-translation-badge" title={t("partialTranslationHint")}>
+              {t("partialTranslation")}
+            </span>
+          )}
           <div className="source-text-mask" aria-hidden="true">
-            {layout.textRects.map((rect, index) => (
+            {maskedRects.map((rect, index) => (
               <span
                 key={index}
                 style={{
@@ -223,7 +242,7 @@ export function TranslationPage({ document, pageNumber, scale, layoutOverride, t
             ))}
           </div>
 
-          {layout.blocks.filter((block) => translatedById.has(block.id)).map((block) => {
+          {translatedBlocks.map((block) => {
             const bodyFontRatio = block.fontSize / Math.max(1, bodyFontSize);
             const normalizedSourceFontSize = block.kind === "text" && bodyFontRatio >= 0.85 && bodyFontRatio <= 1.15
               ? bodyFontSize

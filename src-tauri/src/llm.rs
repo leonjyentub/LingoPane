@@ -6,7 +6,7 @@ use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Mutex, OnceLock},
     time::Duration,
 };
@@ -14,6 +14,16 @@ use std::{
 use crate::limits::{MAX_TRANSLATION_BLOCKS_PER_PAGE, MAX_TRANSLATION_CHARS_PER_PAGE};
 
 const KEYCHAIN_SERVICE: &str = "com.leonjye.parallelpdf.llm";
+
+/// A page is translated in batches so one oversized request can't fail (or
+/// drop) the whole page. A batch ends at whichever limit is hit first.
+const TRANSLATION_BATCH_CHARS: usize = 2000;
+const TRANSLATION_BATCH_BLOCKS: usize = 20;
+/// Batches / per-block requests in flight at once.
+const TRANSLATION_CONCURRENCY: usize = 3;
+/// Times the still-missing subset is retried before falling back to
+/// one-request-per-block, then to reporting it in `missing_ids`.
+const TRANSLATION_RETRIES: usize = 2;
 
 fn active_translations() -> &'static Mutex<HashMap<u64, AbortHandle>> {
     static ACTIVE_TRANSLATIONS: OnceLock<Mutex<HashMap<u64, AbortHandle>>> = OnceLock::new();
@@ -48,6 +58,10 @@ pub struct TranslationRequest {
 pub struct TranslationResult {
     pub blocks: Vec<TranslationBlock>,
     pub model: String,
+    /// Blocks the model never returned a usable translation for, even after
+    /// retries. Their entry in `blocks` has an empty `text`; the frontend
+    /// renders the page as "partial" rather than failing it.
+    pub missing_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -362,48 +376,156 @@ async fn translate_gemma_block(
     })
 }
 
-async fn translate_with_translate_gemma(
-    request: TranslationRequest,
-) -> Result<TranslationResult, String> {
-    if request.source_language.eq_ignore_ascii_case("auto") {
-        return Err(
-            "TranslateGemma 需要明確的來源語言，請在設定中選擇 English、日本語或繁體中文".into(),
-        );
+fn translation_system_prompt(source_language: &str, target_language: &str) -> String {
+    // Prompt version 2 (batched translation). Bump TRANSLATION_PROMPT_VERSION in
+    // src/App.tsx#translationCacheKey whenever this text changes.
+    format!(
+        "You are a professional document translator. Translate each block from {source_language} to {target_language}. Preserve meaning, terminology, numbers, citations, and inline symbols. Return JSON only in this exact shape: {{\"blocks\":[{{\"id\":\"<original id>\",\"text\":\"<translation>\"}}]}}. Return every id you were given, exactly once. Do not add ids that were not given, and do not merge or split blocks."
+    )
+}
+
+/// Split a page's blocks into request-sized batches. A batch ends at whichever
+/// of TRANSLATION_BATCH_BLOCKS / TRANSLATION_BATCH_CHARS is reached first; a
+/// single oversized block still gets its own batch.
+fn batch_blocks(blocks: &[TranslationBlock]) -> Vec<Vec<TranslationBlock>> {
+    let mut batches = Vec::new();
+    let mut current: Vec<TranslationBlock> = Vec::new();
+    let mut current_chars = 0usize;
+    for block in blocks {
+        let block_chars = block.text.chars().count();
+        if !current.is_empty()
+            && (current.len() >= TRANSLATION_BATCH_BLOCKS
+                || current_chars + block_chars > TRANSLATION_BATCH_CHARS)
+        {
+            batches.push(std::mem::take(&mut current));
+            current_chars = 0;
+        }
+        current.push(block.clone());
+        current_chars += block_chars;
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
+/// One JSON chat request for one batch. Returns id → translation for whatever
+/// the model gave back; unknown ids and empty translations are dropped, order
+/// and count are not checked.
+async fn translate_json_batch(
+    client: Client,
+    config: ProviderConfig,
+    source_language: String,
+    target_language: String,
+    blocks: Vec<TranslationBlock>,
+) -> Result<HashMap<String, String>, String> {
+    let wanted: HashSet<&str> = blocks.iter().map(|block| block.id.as_str()).collect();
+    let body = json!({
+        "model": config.model,
+        "temperature": 0.1,
+        "stream": false,
+        "messages": [
+            { "role": "system", "content": translation_system_prompt(&source_language, &target_language) },
+            { "role": "user", "content": json!({ "blocks": blocks }).to_string() }
+        ]
+    });
+
+    let url = endpoint(&config.base_url, "chat/completions")?;
+    let response = authorized(client.post(url).json(&body), &config.provider_id)
+        .send()
+        .await
+        .map_err(|error| format!("翻譯請求失敗：{error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response).await);
     }
 
-    let model = request.config.model.clone();
-    let http_client = client()?;
-    let block_count = request.blocks.len();
-    let results = stream::iter(request.blocks.into_iter().enumerate())
-        .map(|(index, block)| {
-            let http_client = http_client.clone();
-            let config = request.config.clone();
-            let source_language = request.source_language.clone();
-            let target_language = request.target_language.clone();
-            async move {
-                translate_gemma_block(http_client, config, source_language, target_language, block)
-                    .await
-                    .map(|translated| (index, translated))
-            }
-        })
-        .buffer_unordered(3)
-        .collect::<Vec<_>>()
-        .await;
+    let response_bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("無法讀取模型回應內容：{error}"))?;
+    let response_body = parse_chat_response(&response_bytes)?;
+    let content = assistant_content(&response_body)?;
+    let parsed = parse_json_content(&content)?;
+    let returned = serde_json::from_value::<Vec<TranslationBlock>>(
+        parsed
+            .get("blocks")
+            .cloned()
+            .ok_or_else(|| "模型回應缺少 blocks".to_string())?,
+    )
+    .map_err(|error| format!("翻譯區塊格式不正確：{error}"))?;
 
-    let mut ordered = vec![None; block_count];
-    for result in results {
-        let (index, block) = result?;
-        ordered[index] = Some(block);
-    }
-    let blocks = ordered
+    Ok(returned
         .into_iter()
-        .enumerate()
-        .map(|(index, block)| {
-            block.ok_or_else(|| format!("TranslateGemma 遺漏第 {} 個翻譯區塊", index + 1))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .filter(|block| wanted.contains(block.id.as_str()) && !block.text.trim().is_empty())
+        .map(|block| (block.id, block.text))
+        .collect())
+}
 
-    Ok(TranslationResult { blocks, model })
+/// Translate a set of blocks once. Returns whatever came back keyed by id, plus
+/// the first hard failure (network / HTTP / unparseable) if any batch hit one.
+async fn translate_pass(
+    client: &Client,
+    config: &ProviderConfig,
+    source_language: &str,
+    target_language: &str,
+    blocks: &[TranslationBlock],
+    is_gemma: bool,
+) -> (HashMap<String, String>, Option<String>) {
+    let mut translated = HashMap::new();
+    let mut first_error = None;
+
+    if is_gemma {
+        let results = stream::iter(blocks.iter().cloned())
+            .map(|block| {
+                let client = client.clone();
+                let config = config.clone();
+                let source_language = source_language.to_string();
+                let target_language = target_language.to_string();
+                async move {
+                    translate_gemma_block(client, config, source_language, target_language, block)
+                        .await
+                }
+            })
+            .buffer_unordered(TRANSLATION_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        for result in results {
+            match result {
+                Ok(block) if !block.text.trim().is_empty() => {
+                    translated.insert(block.id, block.text);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+    } else {
+        let results = stream::iter(batch_blocks(blocks))
+            .map(|batch| {
+                let client = client.clone();
+                let config = config.clone();
+                let source_language = source_language.to_string();
+                let target_language = target_language.to_string();
+                async move {
+                    translate_json_batch(client, config, source_language, target_language, batch)
+                        .await
+                }
+            })
+            .buffer_unordered(TRANSLATION_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        for result in results {
+            match result {
+                Ok(map) => translated.extend(map),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+    }
+
+    (translated, first_error)
 }
 
 async fn translate_blocks_inner(request: TranslationRequest) -> Result<TranslationResult, String> {
@@ -426,71 +548,118 @@ async fn translate_blocks_inner(request: TranslationRequest) -> Result<Translati
         return Err("單頁文字超過目前的 60,000 字元限制".into());
     }
 
-    if is_translate_gemma(&request.config.model) {
-        return translate_with_translate_gemma(request).await;
+    let is_gemma = is_translate_gemma(&request.config.model);
+    if is_gemma && request.source_language.eq_ignore_ascii_case("auto") {
+        return Err(
+            "TranslateGemma 需要明確的來源語言，請在設定中選擇 English、日本語或繁體中文".into(),
+        );
     }
 
-    let input = json!({ "blocks": request.blocks });
-    let system_prompt = format!(
-        "You are a professional document translator. Translate from {} to {}. Preserve meaning, terminology, numbers, citations, and inline symbols. Return JSON only in this exact shape: {{\"blocks\":[{{\"id\":\"original id\",\"text\":\"translated text\"}}]}}. Keep every input id exactly once and in the same order. Do not merge, omit, explain, or add blocks.",
-        request.source_language, request.target_language
-    );
+    let model = request.config.model.clone();
+    let http_client = client()?;
+    let ids: Vec<String> = request
+        .blocks
+        .iter()
+        .map(|block| block.id.clone())
+        .collect();
+    let mut translated: HashMap<String, String> = HashMap::new();
 
-    let body = json!({
-        "model": request.config.model,
-        "temperature": 0.1,
-        "stream": false,
-        "messages": [
-            { "role": "system", "content": system_prompt },
-            { "role": "user", "content": input.to_string() }
-        ]
-    });
-
-    let url = endpoint(&request.config.base_url, "chat/completions")?;
-    let response = authorized(client()?.post(url).json(&body), &request.config.provider_id)
-        .send()
-        .await
-        .map_err(|error| format!("翻譯請求失敗：{error}"))?;
-
-    if !response.status().is_success() {
-        return Err(response_error(response).await);
-    }
-
-    let response_bytes = response
-        .bytes()
-        .await
-        .map_err(|error| format!("無法讀取模型回應內容：{error}"))?;
-    let response_body = parse_chat_response(&response_bytes)?;
-    let content = assistant_content(&response_body)?;
-    let translated = parse_json_content(&content)?;
-    let blocks = serde_json::from_value::<Vec<TranslationBlock>>(
-        translated
-            .get("blocks")
-            .cloned()
-            .ok_or_else(|| "模型回應缺少 blocks".to_string())?,
+    let (first_map, first_error) = translate_pass(
+        &http_client,
+        &request.config,
+        &request.source_language,
+        &request.target_language,
+        &request.blocks,
+        is_gemma,
     )
-    .map_err(|error| format!("翻譯區塊格式不正確：{error}"))?;
+    .await;
+    translated.extend(first_map);
 
-    if blocks.len() != request.blocks.len() {
-        return Err(format!(
-            "模型回傳 {} 個區塊，但預期為 {} 個",
-            blocks.len(),
-            request.blocks.len()
-        ));
+    // Nothing came back and a batch failed hard → surface the real error rather
+    // than a page of empty translations.
+    if translated.is_empty() {
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        return Err("模型沒有回傳任何翻譯".into());
     }
 
-    for (source, translated) in request.blocks.iter().zip(blocks.iter()) {
-        if source.id != translated.id {
-            return Err(format!(
-                "模型改動了區塊 ID：預期 {}，實際 {}",
-                source.id, translated.id
-            ));
+    let missing_of = |translated: &HashMap<String, String>| -> Vec<TranslationBlock> {
+        request
+            .blocks
+            .iter()
+            .filter(|block| !translated.contains_key(&block.id))
+            .cloned()
+            .collect()
+    };
+
+    for _ in 0..TRANSLATION_RETRIES {
+        let missing = missing_of(&translated);
+        if missing.is_empty() {
+            break;
+        }
+        let (retry_map, _) = translate_pass(
+            &http_client,
+            &request.config,
+            &request.source_language,
+            &request.target_language,
+            &missing,
+            is_gemma,
+        )
+        .await;
+        if retry_map.is_empty() {
+            break; // no progress — stop hammering the model
+        }
+        translated.extend(retry_map);
+    }
+
+    // Last resort for the JSON path: one request per still-missing block.
+    if !is_gemma {
+        let missing = missing_of(&translated);
+        if !missing.is_empty() {
+            let results = stream::iter(missing)
+                .map(|block| {
+                    let client = http_client.clone();
+                    let config = request.config.clone();
+                    let source_language = request.source_language.clone();
+                    let target_language = request.target_language.clone();
+                    async move {
+                        translate_json_batch(
+                            client,
+                            config,
+                            source_language,
+                            target_language,
+                            vec![block],
+                        )
+                        .await
+                    }
+                })
+                .buffer_unordered(TRANSLATION_CONCURRENCY)
+                .collect::<Vec<_>>()
+                .await;
+            for result in results.into_iter().flatten() {
+                translated.extend(result);
+            }
         }
     }
 
+    let missing_ids: Vec<String> = ids
+        .iter()
+        .filter(|id| !translated.contains_key(*id))
+        .cloned()
+        .collect();
+    let blocks = ids
+        .iter()
+        .map(|id| TranslationBlock {
+            id: id.clone(),
+            text: translated.get(id).cloned().unwrap_or_default(),
+        })
+        .collect();
+
     Ok(TranslationResult {
         blocks,
-        model: request.config.model,
+        model,
+        missing_ids,
     })
 }
 
@@ -534,12 +703,48 @@ pub async fn translate_blocks(
 mod tests {
     use super::*;
 
+    fn blocks(specs: &[(&str, usize)]) -> Vec<TranslationBlock> {
+        specs
+            .iter()
+            .map(|(id, chars)| TranslationBlock {
+                id: (*id).to_string(),
+                text: "x".repeat(*chars),
+            })
+            .collect()
+    }
+
     #[test]
     fn joins_openai_paths_without_double_slashes() {
         assert_eq!(
             endpoint("http://localhost:8000/v1/", "models").unwrap(),
             "http://localhost:8000/v1/models"
         );
+    }
+
+    #[test]
+    fn batches_end_at_the_block_count_limit() {
+        let input = blocks(&vec![("b", 10); 45]);
+        let batched = batch_blocks(&input);
+        assert_eq!(batched.len(), 3); // 20 / 20 / 5
+        assert_eq!(batched[0].len(), TRANSLATION_BATCH_BLOCKS);
+        assert_eq!(batched.iter().map(Vec::len).sum::<usize>(), 45);
+    }
+
+    #[test]
+    fn batches_end_at_the_char_budget() {
+        let input = blocks(&[("a", 1500), ("b", 1500), ("c", 100)]);
+        let batched = batch_blocks(&input);
+        assert_eq!(batched.len(), 2); // a | b + c
+        assert_eq!(batched[0].len(), 1);
+        assert_eq!(batched[1].len(), 2);
+    }
+
+    #[test]
+    fn an_oversized_block_still_gets_its_own_batch() {
+        let input = blocks(&[("huge", TRANSLATION_BATCH_CHARS * 3)]);
+        let batched = batch_blocks(&input);
+        assert_eq!(batched.len(), 1);
+        assert_eq!(batched[0][0].id, "huge");
     }
 
     #[test]
