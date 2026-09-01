@@ -5,16 +5,15 @@ Consumes one versioned RenderPlan (src/lib/renderPlan.ts) as --plan-json and
 the original PDF on stdin; writes the rendered PDF to stdout.
 
 Render modes:
-  - faithful:  original page count and coordinates; each translation is written
-               back into its own source box, shrinking to fit
-  - adaptive:  paragraphs reflow within their detected column over the redacted
-               original, flowing around figures / tables / formulas, spilling
-               onto continuation pages
-  - bilingual: original page untouched, followed by a reflowed translation page
-               (+ continuation pages)
+  - faithful: original page count and coordinates; each translation is written
+              back into its own source box, shrinking to fit
+  - adaptive: paragraphs reflow within their detected column over the redacted
+              original, flowing around figures / tables / formulas, spilling
+              onto continuation pages
 
-All three share one text-measurement path (`wrap` on real glyph widths) and one
-column/obstacle model; they differ only in the ModeConfig they run under.
+Both share one text-measurement path (`wrap` on real glyph widths, per-run
+fonts) and one column/obstacle model; they differ only in the ModeConfig they
+run under.
 """
 
 from __future__ import annotations
@@ -36,8 +35,17 @@ _PAGE_MARGIN = 40.0
 # Korean glyphs via MuPDF's fallback font (verified on PyMuPDF 1.28). The old
 # fontfile lookup pointed at /System/Library/Fonts/PingFang.ttc, which does not
 # exist on modern macOS, so every fontfile call silently fell through.
+#
+# Latin runs use Helvetica instead. Two reasons, and the second is a
+# correctness one: `page.insert_text(fontname="china-t")` gives *every* glyph a
+# full-width CID advance — "Manabu Ito 2022" renders 150pt wide while
+# `Font("china-t").text_length()` reports 76.8pt for the same string. Measuring
+# with one metric and drawing with another overflowed every line containing
+# Latin text. Everything is drawn through a TextWriter with these Font objects
+# now, so the width used to wrap is the width that reaches the page.
 _CJK_FONTNAME = "china-t"
-_CJK_FONT: Any | None = None
+_LATIN_FONTNAME = "helv"
+_FONT_CACHE: dict[str, Any] = {}
 
 # Absolute floor for shrink-to-fit. `minFontScale` is the *preferred* floor;
 # we only drop below it (down to this value) to keep an overflowing translation
@@ -52,13 +60,76 @@ def _read_stdin_bytes() -> bytes:
     return sys.stdin.buffer.read()
 
 
+def _font(name: str) -> Any:
+    import pymupdf
+
+    if name not in _FONT_CACHE:
+        _FONT_CACHE[name] = pymupdf.Font(name)
+    return _FONT_CACHE[name]
+
+
 def _cjk_font() -> Any:
-    global _CJK_FONT
-    if _CJK_FONT is None:
+    return _font(_CJK_FONTNAME)
+
+
+def _font_for(unit: str) -> Any:
+    """Pick the face for one wrap unit. CJK always goes to the fallback font;
+    Latin prefers Helvetica but defers to the fallback for anything Helvetica
+    cannot draw (accented forms outside its encoding, symbols, …)."""
+    cjk = _cjk_font()
+    if any(_is_cjk(ch) for ch in unit):
+        return cjk
+    latin = _font(_LATIN_FONTNAME)
+    return latin if all(latin.has_glyph(ord(ch)) for ch in unit) else cjk
+
+
+def _runs(line: str) -> list[tuple[str, Any]]:
+    """Group a rendered line into consecutive same-font runs."""
+    runs: list[tuple[str, Any]] = []
+    for unit in _tokenize(line):
+        font = _font_for(unit)
+        if runs and runs[-1][1] is font:
+            runs[-1] = (runs[-1][0] + unit, font)
+        else:
+            runs.append((unit, font))
+    return runs
+
+
+def _text_width(text: str, size: float) -> float:
+    return sum(font.text_length(run, size) for run, font in _runs(text))
+
+
+class TextCanvas:
+    """One TextWriter per page.
+
+    Writing per block would append a content stream per block; batching keeps
+    the output small and the run order stable.
+    """
+
+    def __init__(self, page: Any):
         import pymupdf
 
-        _CJK_FONT = pymupdf.Font(_CJK_FONTNAME)
-    return _CJK_FONT
+        self.page = page
+        self.writer = pymupdf.TextWriter(page.rect)
+        self._used = False
+
+    @property
+    def rect(self) -> Any:
+        return self.page.rect
+
+    def draw(self, text: str, x: float, baseline: float, size: float) -> None:
+        cursor = x
+        for run, font in _runs(text):
+            if not run:
+                continue
+            self.writer.append((cursor, baseline), run, font=font, fontsize=size)
+            cursor += font.text_length(run, size)
+            self._used = True
+
+    def flush(self) -> None:
+        if self._used:
+            self.writer.write_text(self.page, color=(0, 0, 0))
+            self._used = False
 
 
 def _iter_renderable_blocks(page_plan: dict[str, Any]):
@@ -138,7 +209,6 @@ def render_faithful(pdf_bytes: bytes, plan: dict[str, Any]) -> bytes:
     font_scale = float(plan.get("fontScale", 0.9) or 0.9)
     min_font_scale = float(plan.get("minFontScale", 0.85) or 0.85)
     ratio = line_height_ratio(plan.get("targetLanguage", ""))
-    font = _cjk_font()
 
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     dropped: list[str] = []
@@ -157,13 +227,15 @@ def render_faithful(pdf_bytes: bytes, plan: dict[str, Any]) -> bytes:
 
         _redact_source_text(page, [r for item in renderable for r in item["mask_rects"]])
 
+        canvas = TextCanvas(page)
         for item in renderable:
             overflowed = _insert_at_rect(
-                page, item["text"], item["rect"], item["source_font_size"],
-                font, ratio, font_scale, min_font_scale,
+                canvas, item["text"], item["rect"], item["source_font_size"],
+                ratio, font_scale, min_font_scale,
             )
             if overflowed:
                 dropped.append(f"p{page_number}:{item['id']}")
+        canvas.flush()
 
     if dropped:
         print(
@@ -177,11 +249,10 @@ def render_faithful(pdf_bytes: bytes, plan: dict[str, Any]) -> bytes:
 
 
 def _insert_at_rect(
-    page: Any,
+    canvas: TextCanvas,
     text: str,
     rect: Any,
     source_size: float,
-    font: Any,
     line_height_ratio_value: float,
     font_scale: float,
     min_font_scale: float,
@@ -202,16 +273,16 @@ def _insert_at_rect(
     ratio = min(line_height_ratio_value, _TIGHT_LINE_HEIGHT)
     size = source_size * font_scale
     soft_floor = max(_HARD_MIN_FONT_PT, source_size * min_font_scale)
-    lines = wrap(text, font, size, rect.width)
+    lines = wrap(text, size, rect.width)
 
     for floor in (soft_floor, _HARD_MIN_FONT_PT):
         while len(lines) * size * ratio > rect.height and size > floor:
             size = max(floor, size * 0.9)
-            lines = wrap(text, font, size, rect.width)
+            lines = wrap(text, size, rect.width)
 
     line_height = size * ratio
     fits = max(0, int(rect.height / line_height)) if line_height > 0 else 0
-    _emit_lines(page, lines[:fits], rect.x0, rect.y0, size, line_height)
+    _emit_lines(canvas, lines[:fits], rect.x0, rect.y0, size, line_height)
     return fits < len(lines)
 
 
@@ -262,9 +333,13 @@ def _tokenize(text: str) -> list[str]:
     return units
 
 
-def wrap(text: str, font: Any, size: float, width: float) -> list[str]:
+def wrap(text: str, size: float, width: float) -> list[str]:
     """Greedy wrap using real glyph widths. ASCII runs only break at spaces;
-    CJK breaks anywhere except before a leading-forbidden character."""
+    CJK breaks anywhere except before a leading-forbidden character.
+
+    Each unit is measured with the face it will actually be drawn in, so the
+    width computed here is the width that reaches the page.
+    """
     if not text:
         return []
     if width <= 0 or size <= 0:
@@ -279,7 +354,7 @@ def wrap(text: str, font: Any, size: float, width: float) -> list[str]:
         line = ""
         line_width = 0.0
         for unit in units:
-            unit_width = font.text_length(unit, size)
+            unit_width = _font_for(unit).text_length(unit, size)
             if line and line_width + unit_width > width and unit != " ":
                 if unit in _LEADING_FORBIDDEN:
                     line += unit  # keep the punctuation on this line
@@ -383,7 +458,6 @@ class ModeConfig:
 MODE: dict[str, ModeConfig] = {
     "faithful": ModeConfig(allow_reflow=False, allow_expansion=False, use_obstacles=True, redact=True),
     "adaptive": ModeConfig(allow_reflow=True, allow_expansion=True, use_obstacles=True, redact=True),
-    "bilingual": ModeConfig(allow_reflow=True, allow_expansion=True, use_obstacles=False, redact=False),
 }
 
 
@@ -395,13 +469,13 @@ class Remainder:
     kind: str
 
 
-def _emit_lines(page: Any, lines: list[str], x: float, top: float, size: float, line_height: float) -> None:
+def _emit_lines(
+    canvas: TextCanvas, lines: list[str], x: float, top: float, size: float, line_height: float
+) -> None:
     baseline = top + size
     for line in lines:
         if line:
-            page.insert_text(
-                (x, baseline), line, fontname=_CJK_FONTNAME, fontsize=size, color=(0, 0, 0)
-            )
+            canvas.draw(line, x, baseline, size)
         baseline += line_height
 
 
@@ -565,7 +639,7 @@ class ColumnFlow:
         return max(0.0, total)
 
     def place(
-        self, page: Any, lines: list[str], size: float, kind: str, block_id: str, line_height: float
+        self, canvas: TextCanvas, lines: list[str], size: float, kind: str, block_id: str, line_height: float
     ) -> Remainder | None:
         """Fill segments in order; return whatever did not fit in this column."""
         pending = list(lines)
@@ -578,7 +652,7 @@ class ColumnFlow:
                     self.cursor = self.segments[self.index][0]
                 continue
             take = pending[:fits]
-            _emit_lines(page, take, self.x0, self.cursor, size, line_height)
+            _emit_lines(canvas, take, self.x0, self.cursor, size, line_height)
             self.cursor += len(take) * line_height
             pending = pending[fits:]
             if pending:
@@ -592,48 +666,44 @@ class ColumnFlow:
 
 
 def _flow_blocks(
-    page: Any,
+    canvas: TextCanvas,
     blocks: list[dict[str, Any]],
     columns: list[tuple[float, float]],
     bands: list[tuple[float, float]],
-    font: Any,
     line_height: float,
     font_scale: float,
     min_font_scale: float,
-    obstacles: list[Any] | None = None,
-    pin_non_reflowable: bool = False,
+    obstacles: list[Any],
 ) -> list[Remainder]:
     """Flow the plan's blocks down `columns`, skipping `obstacles`.
 
-    With `pin_non_reflowable` (adaptive, drawing over the original page) any
-    block whose policy says it must not move is written back at its own bbox
-    and treated as one more obstacle. Bilingual draws on a blank page, so it
-    reflows everything and passes no obstacles.
+    Blocks whose policy says they must not move are written back at their own
+    bbox and become one more obstacle for everything that does flow.
     """
     import pymupdf
 
-    obstacles = list(obstacles or [])
-    top, bottom = _PAGE_MARGIN, page.rect.height - _PAGE_MARGIN
+    obstacles = list(obstacles)
+    page_rect = canvas.rect
+    top, bottom = _PAGE_MARGIN, page_rect.height - _PAGE_MARGIN
     remainders: list[Remainder] = []
 
-    if pin_non_reflowable:
-        for block in blocks:
-            kind = block.get("kind", "text")
-            if POLICY[kind].reflow or not POLICY[kind].render:
-                continue
-            bbox = block["bbox"]
-            rect = pymupdf.Rect(bbox["x"], bbox["y"], bbox["x"] + bbox["width"], bbox["y"] + bbox["height"])
-            _insert_at_rect(page, block.get("text", ""), rect, block.get("fontSize", 10) or 10,
-                            font, line_height, font_scale, min_font_scale)
-            obstacles.append(rect)
+    for block in blocks:
+        kind = block.get("kind", "text")
+        if POLICY[kind].reflow or not POLICY[kind].render:
+            continue
+        bbox = block["bbox"]
+        rect = pymupdf.Rect(bbox["x"], bbox["y"], bbox["x"] + bbox["width"], bbox["y"] + bbox["height"])
+        _insert_at_rect(canvas, block.get("text", ""), rect, block.get("fontSize", 10) or 10,
+                        line_height, font_scale, min_font_scale)
+        obstacles.append(rect)
 
     flows = [ColumnFlow(x0, x1, free_segments(top, bottom, obstacles, x0, x1)) for x0, x1 in columns]
-    span_x0, span_x1 = _PAGE_MARGIN, page.rect.width - _PAGE_MARGIN
+    span_x0, span_x1 = _PAGE_MARGIN, page_rect.width - _PAGE_MARGIN
     span_flow_segments = free_segments(top, bottom, obstacles, span_x0, span_x1)
 
     def column_of(block: dict[str, Any]) -> int | None:
         width = block["bbox"]["width"]
-        if len(columns) == 1 or width > page.rect.width * 0.7:
+        if len(columns) == 1 or width > page_rect.width * 0.7:
             return None  # spanning
         center = block["bbox"]["x"] + width / 2
         return min(
@@ -643,10 +713,8 @@ def _flow_blocks(
 
     for block in blocks:
         kind = block.get("kind", "text")
-        if not POLICY[kind].render:
-            continue
-        if pin_non_reflowable and not POLICY[kind].reflow:
-            continue  # already placed at its own bbox above
+        if not POLICY[kind].render or not POLICY[kind].reflow:
+            continue  # pinned blocks were placed at their own bbox above
 
         column_index = column_of(block)
         if column_index is None:
@@ -662,14 +730,14 @@ def _flow_blocks(
 
         source_size = block.get("fontSize", 10) or 10
         size = source_size * font_scale
-        lines = wrap(block.get("text", ""), font, size, flow.width)
+        lines = wrap(block.get("text", ""), size, flow.width)
         if POLICY[kind].shrink and len(lines) * size * line_height > flow.remaining():
             shrunk = source_size * min_font_scale
-            shrunk_lines = wrap(block.get("text", ""), font, shrunk, flow.width)
+            shrunk_lines = wrap(block.get("text", ""), shrunk, flow.width)
             if len(shrunk_lines) * shrunk * line_height <= flow.remaining():
                 size, lines = shrunk, shrunk_lines
 
-        remainder = flow.place(page, lines, size, kind, block.get("id", ""), size * line_height)
+        remainder = flow.place(canvas, lines, size, kind, block.get("id", ""), size * line_height)
         if remainder is not None:
             remainders.append(remainder)
         if column_index is None:
@@ -680,92 +748,22 @@ def _flow_blocks(
     return remainders
 
 
-def _flow_remainders(page: Any, remainders: list[Remainder], line_height: float) -> list[Remainder]:
+def _flow_remainders(canvas: TextCanvas, remainders: list[Remainder], line_height: float) -> list[Remainder]:
     """Continuation page: one full-width column, no reflow decisions left."""
-    top, bottom = _PAGE_MARGIN, page.rect.height - _PAGE_MARGIN
-    flow = ColumnFlow(_PAGE_MARGIN, page.rect.width - _PAGE_MARGIN, [(top, bottom)])
+    top, bottom = _PAGE_MARGIN, canvas.rect.height - _PAGE_MARGIN
+    flow = ColumnFlow(_PAGE_MARGIN, canvas.rect.width - _PAGE_MARGIN, [(top, bottom)])
     still: list[Remainder] = []
     for remainder in remainders:
         if still:
             still.append(remainder)
             continue
         leftover = flow.place(
-            page, remainder.lines, remainder.size, remainder.kind,
+            canvas, remainder.lines, remainder.size, remainder.kind,
             remainder.block_id, remainder.size * line_height,
         )
         if leftover is not None:
             still.append(leftover)
     return still
-
-
-def render_bilingual(pdf_bytes: bytes, plan: dict[str, Any]) -> bytes:
-    """Original page, then a reflowed translation page (+ continuation pages)."""
-    import pymupdf
-
-    source = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-    output = pymupdf.open()
-    font = _cjk_font()
-    line_height = line_height_ratio(plan.get("targetLanguage", ""))
-    font_scale = float(plan.get("fontScale", 0.9) or 0.9)
-    min_font_scale = float(plan.get("minFontScale", 0.85) or 0.85)
-    plan_by_page = {int(page["pageNumber"]): page for page in plan.get("pages", [])}
-    overflowed: list[int] = []
-
-    for page_index in range(len(source)):
-        page_number = page_index + 1
-        output.insert_pdf(source, from_page=page_index, to_page=page_index)
-
-        page_plan = plan_by_page.get(page_number)
-        if not page_plan:
-            continue
-        source_page = source[page_index]
-        _assert_same_coordinate_system(source_page, page_plan, page_number)
-
-        width, height = source_page.rect.width, source_page.rect.height
-        bands = detect_columns(page_plan["blocks"], width)
-        columns = _bands_to_columns(bands, width)
-
-        translation_page = output.new_page(width=width, height=height)
-        remainders = _flow_blocks(
-            translation_page, page_plan["blocks"], columns, bands,
-            font, line_height, font_scale, min_font_scale,
-        )
-
-        continuation = 0
-        while remainders and continuation < MAX_CONTINUATION_PAGES:
-            continuation += 1
-            cont_page = output.new_page(width=width, height=height)
-            remainders = _flow_remainders(cont_page, remainders, line_height)
-        if remainders:
-            overflowed.append(page_number)
-
-    if overflowed:
-        print(
-            f"以下頁面的譯文超過 {MAX_CONTINUATION_PAGES} 頁續頁上限，尾段未輸出："
-            + ", ".join(str(n) for n in overflowed),
-            file=sys.stderr,
-        )
-
-    result = output.tobytes()
-    output.close()
-    source.close()
-    return result
-
-
-def _bands_to_columns(bands: list[tuple[float, float]], page_width: float) -> list[tuple[float, float]]:
-    """Map detected bands into the page's margin box."""
-    if len(bands) <= 1:
-        return [(_PAGE_MARGIN, page_width - _PAGE_MARGIN)]
-    usable = page_width - 2 * _PAGE_MARGIN
-    span_start, span_end = bands[0][0], bands[-1][1]
-    total = max(1.0, span_end - span_start)
-    gutter = 12.0
-    columns = []
-    for start, end in bands:
-        left = _PAGE_MARGIN + (start - span_start) / total * usable
-        right = _PAGE_MARGIN + (end - span_start) / total * usable
-        columns.append((left + gutter / 2, right - gutter / 2))
-    return columns
 
 
 def render_adaptive(pdf_bytes: bytes, plan: dict[str, Any]) -> bytes:
@@ -778,7 +776,6 @@ def render_adaptive(pdf_bytes: bytes, plan: dict[str, Any]) -> bytes:
     import pymupdf
 
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-    font = _cjk_font()
     ratio = line_height_ratio(plan.get("targetLanguage", ""))
     font_scale = float(plan.get("fontScale", 0.9) or 0.9)
     min_font_scale = float(plan.get("minFontScale", 0.85) or 0.85)
@@ -806,17 +803,18 @@ def render_adaptive(pdf_bytes: bytes, plan: dict[str, Any]) -> bytes:
         _redact_source_text(page, masks)
 
         bands = detect_columns(page_plan["blocks"], page.rect.width)
-        # Unlike bilingual, adaptive writes back onto the original page, so the
-        # detected bands are used as-is rather than remapped into the margins.
+        # Text is written back onto the original page, so the detected bands are
+        # used as-is rather than remapped into the page margins.
         columns = (
             [(_PAGE_MARGIN, page.rect.width - _PAGE_MARGIN)] if len(bands) <= 1 else list(bands)
         )
 
+        canvas = TextCanvas(page)
         remainders = _flow_blocks(
-            page, page_plan["blocks"], columns, bands, font, ratio,
-            font_scale, min_font_scale,
-            obstacles=obstacles, pin_non_reflowable=True,
+            canvas, page_plan["blocks"], columns, bands, ratio,
+            font_scale, min_font_scale, obstacles,
         )
+        canvas.flush()
         if remainders:
             pending.append((page_number - 1, remainders))
 
@@ -830,7 +828,9 @@ def render_adaptive(pdf_bytes: bytes, plan: dict[str, Any]) -> bytes:
                 width=source_rect.width,
                 height=source_rect.height,
             )
-            remainders = _flow_remainders(cont_page, remainders, ratio)
+            cont_canvas = TextCanvas(cont_page)
+            remainders = _flow_remainders(cont_canvas, remainders, ratio)
+            cont_canvas.flush()
         if remainders:
             overflowed.append(page_index + 1)
 
@@ -854,7 +854,6 @@ def render(pdf_bytes: bytes, plan: dict[str, Any]) -> bytes:
     mode = plan.get("mode", "faithful")
     renderers = {
         "faithful": render_faithful,
-        "bilingual": render_bilingual,
         "adaptive": render_adaptive,
     }
     if mode not in renderers:

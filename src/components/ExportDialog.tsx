@@ -13,10 +13,9 @@ type ExportDialogProps = {
   t: Translator;
 };
 
-const RENDER_MODES: Array<{ value: RenderMode; available: boolean; labelKey: MessageKey; helpKey: MessageKey }> = [
-  { value: "faithful", available: true, labelKey: "renderFaithful", helpKey: "renderFaithfulHelp" },
-  { value: "adaptive", available: true, labelKey: "renderAdaptive", helpKey: "renderAdaptiveHelp" },
-  { value: "bilingual", available: true, labelKey: "renderBilingual", helpKey: "renderBilingualHelp" },
+const RENDER_MODES: Array<{ value: RenderMode; labelKey: MessageKey; helpKey: MessageKey }> = [
+  { value: "faithful", labelKey: "renderFaithful", helpKey: "renderFaithfulHelp" },
+  { value: "adaptive", labelKey: "renderAdaptive", helpKey: "renderAdaptiveHelp" },
 ];
 
 export function ExportDialog({
@@ -40,21 +39,18 @@ export function ExportDialog({
         </div>
 
         <div className="export-options">
-          {RENDER_MODES.map(({ value, available, labelKey, helpKey }) => (
-            <label
-              key={value}
-              className={`export-option ${renderMode === value ? "is-selected" : ""}${available ? "" : " is-unavailable"}`}
-            >
+          {RENDER_MODES.map(({ value, labelKey, helpKey }) => (
+            <label key={value} className={`export-option ${renderMode === value ? "is-selected" : ""}`}>
               <input
                 type="radio"
                 name="renderMode"
                 value={value}
                 checked={renderMode === value}
-                disabled={!available || exporting}
+                disabled={exporting}
                 onChange={() => onModeChange(value)}
               />
               <div className="export-option-content">
-                <strong>{t(labelKey)}{available ? "" : ` ${t("comingSoon")}`}</strong>
+                <strong>{t(labelKey)}</strong>
                 <span className="export-option-desc">{t(helpKey)}</span>
               </div>
             </label>

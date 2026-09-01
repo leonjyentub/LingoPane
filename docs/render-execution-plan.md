@@ -4,6 +4,13 @@
 > 設計理由與取捨：見 [`render-architecture-decision.md`](./render-architecture-decision.md)
 > **本文件是操作入口。** 接手時先讀第 1、2 節，再從第 4 節的 PR-1 開始按序執行。
 
+## 執行結果（2026-09-02）
+
+PR-1 ~ PR-6 全數完成並併入 `main`。以下兩項與原計畫不同，本文件其餘內容保留為當時的規劃紀錄：
+
+- **雙語版（bilingual）已移除。** 它在 PR-5 實作完成，作用是驗證 flow planner 的最小子集；PR-6 的 adaptive 完成後產品上不再需要交錯排版，故整條路徑（`render_bilingual`、`_bands_to_columns`、`MODE["bilingual"]`、對應 i18n 與 UI 選項）連同測試一併刪除。目前只保留 **忠實版** 與 **自適應版**。
+- **文字量測改用 per-run 字型。** `page.insert_text(fontname="china-t")` 會給每個字全形前進寬度（`"Manabu Ito 2022"` 實際畫成 150pt，`Font.text_length()` 只回報 76.8pt），量測與渲染不一致使含拉丁字的行必定溢出。改為統一走 `TextWriter` + `Font` 物件，並把拉丁字段分流到 Helvetica。
+
 ---
 
 ## 0. 這份文件怎麼用

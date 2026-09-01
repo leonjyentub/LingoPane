@@ -6,7 +6,7 @@ import type { TranslatedBlock } from "../components/TranslationPage";
 // Rust command and pdf_renderer.py both check it.
 export const RENDER_PLAN_VERSION = 1;
 
-export type RenderMode = "faithful" | "adaptive" | "bilingual";
+export type RenderMode = "faithful" | "adaptive";
 
 export type RenderRect = { x: number; y: number; width: number; height: number };
 

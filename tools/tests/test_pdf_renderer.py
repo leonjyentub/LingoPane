@@ -1,12 +1,14 @@
-"""Contract tests for tools/pdf_renderer.py (RenderPlan / faithful export).
+"""Contract tests for tools/pdf_renderer.py (RenderPlan, faithful + adaptive).
 
 Guards:
-  - only `faithful` renders; other modes fail with a clear message
-  - an unsupported plan version is rejected
+  - an unsupported plan version or unknown mode is rejected
   - redaction keeps vector line art (table rules) and images
-  - translated text uses the bundled CJK font and is extractable
+  - translated text is extractable, CJK and Latin each in their own face
+  - the width `wrap` measures is the width TextCanvas actually draws
   - blocks that overflow shrink toward the minimum instead of vanishing silently
   - a page whose geometry disagrees with the plan is rejected, not misplaced
+  - adaptive flows around figures, pins non-reflowable blocks, and caps
+    continuation pages
 """
 
 from __future__ import annotations
@@ -93,8 +95,9 @@ class PdfRendererTests(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertIn("這是一段用於測試的繁體中文翻譯", p.get_text())
         self.assertNotIn("Original English paragraph", p.get_text())
+        cjk_face = pdf_renderer._cjk_font().name
         font_names = {name for _, _, _, name, _, _ in p.get_fonts()}
-        self.assertTrue(any("Fangti" in n or "china" in n.lower() for n in font_names))
+        self.assertTrue(any(cjk_face in n for n in font_names), f"got {font_names}")
         self.assertGreaterEqual(len(p.get_drawings()), 1)  # the vector rule survives
 
     def test_overflowing_block_is_reported_not_dropped_silently(self) -> None:
@@ -124,27 +127,49 @@ class PdfRendererTests(unittest.TestCase):
 
 
 class FlowPlannerTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.font = pdf_renderer._cjk_font()
-
     def test_wrap_ascii_breaks_only_at_spaces(self) -> None:
-        lines = pdf_renderer.wrap("the quick brown fox jumps over", self.font, 10, 70)
+        lines = pdf_renderer.wrap("the quick brown fox jumps over", 10, 70)
         self.assertGreater(len(lines), 1)
         for line in lines:
             self.assertNotIn(" ", (line[:1] + line[-1:]))  # no leading/trailing space
-            self.assertLessEqual(self.font.text_length(line, 10), 70 + 1e-6)
+            self.assertLessEqual(pdf_renderer._text_width(line, 10), 70 + 1e-6)
 
     def test_wrap_cjk_breaks_anywhere_but_not_before_forbidden_punct(self) -> None:
-        lines = pdf_renderer.wrap("結尾標點測試，句號。逗號，不能在行首", self.font, 10, 52)
+        lines = pdf_renderer.wrap("結尾標點測試，句號。逗號，不能在行首", 10, 52)
         self.assertGreater(len(lines), 1)
         for line in lines[1:]:
             self.assertNotIn(line[0], pdf_renderer._LEADING_FORBIDDEN)
 
     def test_wrap_keeps_ascii_words_whole_in_mixed_text(self) -> None:
-        lines = pdf_renderer.wrap("這是 mixed 中英 content 測試", self.font, 10, 60)
+        lines = pdf_renderer.wrap("這是 mixed 中英 content 測試", 10, 60)
         self.assertIn("mixed", "".join(lines))
         for word in ("mixed", "content"):
             self.assertTrue(any(word in line for line in lines))
+
+    def test_latin_runs_use_the_latin_face(self) -> None:
+        latin = pdf_renderer._font(pdf_renderer._LATIN_FONTNAME)
+        cjk = pdf_renderer._cjk_font()
+        self.assertIs(pdf_renderer._font_for("Manabu"), latin)
+        self.assertIs(pdf_renderer._font_for("中文"), cjk)
+        runs = pdf_renderer._runs("中文 Manabu 混排")
+        self.assertGreaterEqual(len(runs), 3)
+        self.assertTrue(any(run.strip() == "Manabu" and font is latin for run, font in runs))
+
+    def test_measured_width_matches_what_is_drawn(self) -> None:
+        # page.insert_text(fontname="china-t") gives Latin a full-width CID
+        # advance, so measuring one way and drawing the other overflowed every
+        # line containing Latin. TextCanvas must render at the measured width.
+        text = "Manabu Ito 2022 混排"
+        expected = pdf_renderer._text_width(text, 10)
+        doc = pymupdf.open()
+        page = doc.new_page(width=500, height=200)
+        canvas = pdf_renderer.TextCanvas(page)
+        canvas.draw(text, 20, 100, 10)
+        canvas.flush()
+        spans = [s for b in page.get_text("dict")["blocks"] if b["type"] == 0
+                 for line in b["lines"] for s in line["spans"]]
+        drawn = max(s["bbox"][2] for s in spans) - min(s["bbox"][0] for s in spans)
+        self.assertAlmostEqual(drawn, expected, delta=1.5)
 
     def test_detect_columns_two_column_fixture(self) -> None:
         doc = pymupdf.open(_FIXTURES / "docling-two-column-table.pdf")
@@ -168,25 +193,10 @@ class FlowPlannerTests(unittest.TestCase):
     def test_policy_and_mode_tables_cover_every_kind_and_mode(self) -> None:
         for kind in ("text", "heading", "caption", "table", "formula", "artifact"):
             self.assertIn(kind, pdf_renderer.POLICY)
-        for mode in ("faithful", "adaptive", "bilingual"):
-            self.assertIn(mode, pdf_renderer.MODE)
+        self.assertEqual(set(pdf_renderer.MODE), {"faithful", "adaptive"})
         self.assertTrue(pdf_renderer.POLICY["caption"].pin)  # captions stay with their figure
-        self.assertFalse(pdf_renderer.MODE["bilingual"].redact)
-
-    def test_bilingual_interleaves_original_and_translation_pages(self) -> None:
-        doc = pymupdf.open(_FIXTURES / "docling-two-column-table.pdf")
-        pages = [{
-            "pageNumber": n + 1,
-            "width": doc[n].rect.width,
-            "height": doc[n].rect.height,
-            "blocks": [_block(f"p{n}-b{i}", 60, 90 + i * 40, 240, 30,
-                              f"這是第 {n + 1} 頁第 {i} 段的翻譯內容，字數足夠觀察換行。")
-                       for i in range(4)],
-        } for n in range(len(doc))]
-        rendered = pdf_renderer.render_bilingual(doc.tobytes(), _plan(pages, mode="bilingual"))
-        out = pymupdf.open(stream=rendered, filetype="pdf")
-        self.assertGreaterEqual(len(out), 2 * len(doc))
-        self.assertIn("這是第 1 頁第 0 段", out[1].get_text())  # page 2 is page 1's translation
+        self.assertFalse(pdf_renderer.MODE["faithful"].allow_reflow)
+        self.assertTrue(pdf_renderer.MODE["adaptive"].allow_expansion)
 
     def test_free_segments_cuts_the_obstacle_out_of_the_column(self) -> None:
         obstacle = pymupdf.Rect(60, 300, 260, 400)
@@ -282,7 +292,7 @@ class FlowPlannerTests(unittest.TestCase):
         self.assertLessEqual(len(out), len(doc) + pdf_renderer.MAX_CONTINUATION_PAGES)
         self.assertIn("續頁測試內容", out[1].get_text())  # continuation follows page 1
 
-    def test_bilingual_caps_continuation_pages(self) -> None:
+    def test_adaptive_caps_continuation_pages_and_says_so(self) -> None:
         doc = pymupdf.open(_FIXTURES / "docling-two-column-table.pdf")
         pages = [{
             "pageNumber": 1,
@@ -293,12 +303,11 @@ class FlowPlannerTests(unittest.TestCase):
         stderr = io.StringIO()
         real, sys.stderr = sys.stderr, stderr
         try:
-            rendered = pdf_renderer.render_bilingual(doc.tobytes(), _plan(pages, mode="bilingual"))
+            rendered = pdf_renderer.render_adaptive(doc.tobytes(), _plan(pages, mode="adaptive"))
         finally:
             sys.stderr = real
         out = pymupdf.open(stream=rendered, filetype="pdf")
-        # 2 originals + 1 translation + at most MAX_CONTINUATION_PAGES
-        self.assertLessEqual(len(out), len(doc) + 1 + pdf_renderer.MAX_CONTINUATION_PAGES)
+        self.assertLessEqual(len(out), len(doc) + pdf_renderer.MAX_CONTINUATION_PAGES)
         self.assertIn("續頁上限", stderr.getvalue())
 
 
