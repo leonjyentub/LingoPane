@@ -168,6 +168,7 @@ const messages = {
     renderFaithfulHelp: "維持原頁面座標與頁數，必要時縮小譯文字級。",
     renderAdaptiveHelp: "維持圖表與公式位置，段落在欄內重新流動，允許新增頁面。",
     renderBilingualHelp: "原文頁與翻譯頁交錯排列，方便逐頁對照。",
+    exportLayoutDiffers: "匯出檔採重新排版，與畫面上的並排預覽不同。",
   },
   en: {
     unexpectedError: "An unexpected error occurred",
@@ -335,6 +336,7 @@ const messages = {
     renderFaithfulHelp: "Keeps original page coordinates and page count, shrinking translated text when needed.",
     renderAdaptiveHelp: "Keeps figures and formulas in place while paragraphs reflow within their column; may add pages.",
     renderBilingualHelp: "Interleaves each original page with its translation for side-by-side reading.",
+    exportLayoutDiffers: "The exported file is re-laid-out and will not match the side-by-side preview.",
   },
 } as const;
 

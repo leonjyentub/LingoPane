@@ -208,6 +208,7 @@ button { color: inherit; }
 .export-option-content { display: flex; flex-direction: column; gap: 2px; }
 .export-option-content strong { color: #36332f; font-size: 12px; font-weight: 620; }
 .export-option-desc { color: #77726a; font-size: 10px; line-height: 1.4; }
+.export-preview-note { margin: 12px 19px 0; color: #8a857c; font-size: 10px; line-height: 1.5; }
 
 .visually-hidden { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
