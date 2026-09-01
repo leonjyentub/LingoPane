@@ -185,13 +185,10 @@ function loadSettings(): ReaderSettings {
     if (parsed.layoutModel !== "heron" && parsed.layoutModel !== "egret-large" && parsed.layoutModel !== "egret-xlarge") {
       parsed.layoutModel = initialSettings.layoutModel;
     }
-    if (parsed.renderMode !== "faithful" && parsed.renderMode !== "adaptive" && parsed.renderMode !== "bilingual") {
+    // Covers both an unknown value and a profile still holding the removed
+    // "bilingual" mode.
+    if (parsed.renderMode !== "faithful" && parsed.renderMode !== "adaptive") {
       parsed.renderMode = initialSettings.renderMode;
-    }
-    // adaptive / bilingual export is not wired up yet; pin older profiles to the
-    // only mode that produces a valid PDF (see docs/render-execution-plan.md).
-    if (!parsed.settingsVersion || parsed.settingsVersion < 8) {
-      parsed.renderMode = "faithful";
     }
     if (typeof parsed.doclingPythonPath !== "string") parsed.doclingPythonPath = "";
     if (typeof parsed.doclingOcr !== "boolean") parsed.doclingOcr = initialSettings.doclingOcr;
@@ -1565,7 +1562,6 @@ function App() {
                 <select value={settings.renderMode} onChange={(event) => setSettings({ ...settings, renderMode: event.target.value as RenderMode })}>
                   <option value="faithful">{t("renderFaithful")}</option>
                   <option value="adaptive">{t("renderAdaptive")}</option>
-                  <option value="bilingual">{t("renderBilingual")}</option>
                 </select>
                 <small className="field-help">{t("renderModeHelp")}</small>
               </label>
