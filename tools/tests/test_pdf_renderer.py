@@ -64,9 +64,9 @@ def _block(bid, x, y, w, h, text, *, font_size=11, masks=None):
 
 
 class PdfRendererTests(unittest.TestCase):
-    def test_adaptive_still_not_implemented(self) -> None:
+    def test_unknown_mode_is_rejected(self) -> None:
         with self.assertRaises(NotImplementedError):
-            pdf_renderer.render(b"", _plan([], mode="adaptive"))
+            pdf_renderer.render(b"", _plan([], mode="sideways"))
 
     def test_unsupported_plan_version_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
@@ -187,6 +187,100 @@ class FlowPlannerTests(unittest.TestCase):
         out = pymupdf.open(stream=rendered, filetype="pdf")
         self.assertGreaterEqual(len(out), 2 * len(doc))
         self.assertIn("這是第 1 頁第 0 段", out[1].get_text())  # page 2 is page 1's translation
+
+    def test_free_segments_cuts_the_obstacle_out_of_the_column(self) -> None:
+        obstacle = pymupdf.Rect(60, 300, 260, 400)
+        segments = pdf_renderer.free_segments(50, 700, [obstacle], 50, 280)
+        self.assertEqual(len(segments), 2)
+        self.assertLess(segments[0][1], 300)  # ends above the obstacle
+        self.assertGreater(segments[1][0], 400)  # resumes below it
+
+    def test_free_segments_ignores_an_obstacle_in_the_other_column(self) -> None:
+        obstacle = pymupdf.Rect(330, 300, 560, 400)
+        segments = pdf_renderer.free_segments(50, 700, [obstacle], 50, 280)
+        self.assertEqual(segments, [(50, 700)])
+
+    def test_merge_rects_clusters_overlapping_strokes(self) -> None:
+        strokes = [pymupdf.Rect(10, 10, 40, 12), pymupdf.Rect(38, 11, 70, 13), pymupdf.Rect(200, 200, 220, 220)]
+        clusters = pdf_renderer._merge_rects(strokes)
+        self.assertEqual(len(clusters), 2)
+
+    def test_page_obstacles_finds_images_and_unmasked_text(self) -> None:
+        doc = pymupdf.open()
+        page = doc.new_page(width=400, height=400)
+        page.insert_text((50, 60), "translated away", fontsize=11)
+        page.insert_text((50, 200), "preserved formula", fontsize=11)
+        masked = [pymupdf.Rect(45, 48, 200, 64)]  # only the first line
+        obstacles = pdf_renderer.page_obstacles(page, masked)
+        self.assertTrue(any(o.y0 > 180 for o in obstacles), "preserved text must be an obstacle")
+        self.assertFalse(any(o.y1 < 70 for o in obstacles), "masked text must not be an obstacle")
+
+    def test_adaptive_flows_text_around_a_figure(self) -> None:
+        doc = pymupdf.open(_FIXTURES / "2022_Ito_Sentence_Embedding_Emotion_Recognition.pdf")
+        page = doc[0]
+        figure = next(pymupdf.Rect(b["bbox"]) for b in page.get_text("dict")["blocks"] if b["type"] == 1)
+
+        # Right-column paragraphs, one of them starting inside the figure band.
+        blocks = [
+            _block(f"p1-b{i}", 320, 170 + i * 30, 240, 24,
+                   "這是一段會重新流動的譯文內容，長度足以產生數行。" * 2)
+            for i in range(6)
+        ]
+        pages = [{"pageNumber": 1, "width": page.rect.width, "height": page.rect.height, "blocks": blocks}]
+        rendered = pdf_renderer.render_adaptive(doc.tobytes(), _plan(pages, mode="adaptive"))
+        out = pymupdf.open(stream=rendered, filetype="pdf")
+
+        written = [
+            pymupdf.Rect(span["bbox"])
+            for block in out[0].get_text("dict")["blocks"] if block["type"] == 0
+            for line in block["lines"] for span in line["spans"]
+            if "重新流動" in span["text"]
+        ]
+        self.assertTrue(written, "adaptive must write the translations")
+        for rect in written:
+            overlap = rect & figure
+            self.assertTrue(overlap.is_empty or overlap.get_area() < 1,
+                            f"translated text at {rect} landed on the figure {figure}")
+
+    def test_adaptive_pins_non_reflowable_blocks_at_their_bbox(self) -> None:
+        doc = pymupdf.open(_FIXTURES / "docling-two-column-table.pdf")
+        page = doc[0]
+        pinned = dict(_block("t0", 323, 200, 120, 14, "表格儲存格"), kind="table")
+        pages = [{
+            "pageNumber": 1, "width": page.rect.width, "height": page.rect.height,
+            "blocks": [pinned, _block("b0", 48, 100, 240, 40, "會流動的段落內容。" * 3)],
+        }]
+        rendered = pdf_renderer.render_adaptive(doc.tobytes(), _plan(pages, mode="adaptive"))
+        out = pymupdf.open(stream=rendered, filetype="pdf")
+        cell = next(
+            pymupdf.Rect(span["bbox"])
+            for block in out[0].get_text("dict")["blocks"] if block["type"] == 0
+            for line in block["lines"] for span in line["spans"]
+            if "表格儲存格" in span["text"]
+        )
+        self.assertAlmostEqual(cell.x0, 323, delta=4)
+        self.assertAlmostEqual(cell.y0, 200, delta=8)
+
+    def test_adaptive_keeps_the_page_count_when_nothing_overflows(self) -> None:
+        doc = pymupdf.open(_FIXTURES / "docling-two-column-table.pdf")
+        pages = [{
+            "pageNumber": 1, "width": doc[0].rect.width, "height": doc[0].rect.height,
+            "blocks": [_block("b0", 48, 100, 240, 40, "短短的譯文。")],
+        }]
+        rendered = pdf_renderer.render_adaptive(doc.tobytes(), _plan(pages, mode="adaptive"))
+        self.assertEqual(len(pymupdf.open(stream=rendered, filetype="pdf")), len(doc))
+
+    def test_adaptive_adds_continuation_pages_right_after_their_source(self) -> None:
+        doc = pymupdf.open(_FIXTURES / "docling-two-column-table.pdf")
+        pages = [{
+            "pageNumber": 1, "width": doc[0].rect.width, "height": doc[0].rect.height,
+            "blocks": [_block("huge", 48, 100, 240, 40, "續頁測試內容。" * 800)],
+        }]
+        rendered = pdf_renderer.render_adaptive(doc.tobytes(), _plan(pages, mode="adaptive"))
+        out = pymupdf.open(stream=rendered, filetype="pdf")
+        self.assertGreater(len(out), len(doc))
+        self.assertLessEqual(len(out), len(doc) + pdf_renderer.MAX_CONTINUATION_PAGES)
+        self.assertIn("續頁測試內容", out[1].get_text())  # continuation follows page 1
 
     def test_bilingual_caps_continuation_pages(self) -> None:
         doc = pymupdf.open(_FIXTURES / "docling-two-column-table.pdf")

@@ -13,11 +13,10 @@ type ExportDialogProps = {
   t: Translator;
 };
 
-// `adaptive` lands with the obstacle-aware planner in PR-6.
 const RENDER_MODES: Array<{ value: RenderMode; available: boolean; labelKey: MessageKey; helpKey: MessageKey }> = [
   { value: "faithful", available: true, labelKey: "renderFaithful", helpKey: "renderFaithfulHelp" },
+  { value: "adaptive", available: true, labelKey: "renderAdaptive", helpKey: "renderAdaptiveHelp" },
   { value: "bilingual", available: true, labelKey: "renderBilingual", helpKey: "renderBilingualHelp" },
-  { value: "adaptive", available: false, labelKey: "renderAdaptive", helpKey: "renderAdaptiveHelp" },
 ];
 
 export function ExportDialog({
@@ -61,6 +60,8 @@ export function ExportDialog({
             </label>
           ))}
         </div>
+
+        <p className="export-preview-note">{t("exportLayoutDiffers")}</p>
 
         <div className="modal-actions">
           <button className="secondary-button" onClick={onCancel} disabled={exporting}>{t("close")}</button>
